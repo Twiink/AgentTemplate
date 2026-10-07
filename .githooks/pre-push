@@ -1,0 +1,17 @@
+#!/usr/bin/env sh
+
+set -eu
+
+ROOT_DIR="$(git rev-parse --show-toplevel)"
+. "$ROOT_DIR/scripts/git-hooks/common.sh"
+cd "$ROOT_DIR"
+
+ensure_command uv || exit 1
+
+print_section '推送前全量检查'
+uv lock --check
+uv run --no-sync ruff check src tests
+uv run --no-sync ruff format --check src tests
+uv run --no-sync ty check src
+
+printf '%s\n' '推送前检查通过。'

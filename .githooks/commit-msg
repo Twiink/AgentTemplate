@@ -1,0 +1,39 @@
+#!/usr/bin/env sh
+
+set -eu
+
+ROOT_DIR="$(git rev-parse --show-toplevel)"
+. "$ROOT_DIR/scripts/git-hooks/common.sh"
+cd "$ROOT_DIR"
+
+MESSAGE_FILE="${1:?commit message file is required}"
+FIRST_LINE="$(sed -n '1p' "$MESSAGE_FILE" | tr -d '\r')"
+TYPE_PATTERN='feat|fix|docs|style|refactor|perf|test|chore'
+
+# Allow Git-generated merge/revert and history-editing messages.
+if printf '%s' "$FIRST_LINE" | grep -Eq '^(Merge|Revert|fixup!|squash!|amend!) '; then
+  exit 0
+fi
+
+if ! printf '%s' "$FIRST_LINE" | grep -Eq "^($TYPE_PATTERN)\\([A-Za-z0-9_-]+\\): .+"; then
+  printf '%s\n' '提交信息格式不正确，需要符合 <type>(<scope>): <subject>。' >&2
+  printf '%s\n' '示例：feat(agent): 新增健康检查接口' >&2
+  exit 1
+fi
+
+SUBJECT="${FIRST_LINE#*: }"
+if ! printf '%s' "$SUBJECT" | LC_ALL=C grep -q "$(printf '[\344\270\200-\351\277\277]')"; then
+  printf '%s\n' '提交主题必须包含中文。' >&2
+  exit 1
+fi
+
+EXTRA="$(sed '/^# -\{24\} >8 -\{24\}$/,$d' "$MESSAGE_FILE" \
+  | sed '1d' \
+  | grep -v '^#' \
+  | grep -v '^[[:space:]]*$' || true)"
+
+if [ -n "$EXTRA" ]; then
+  printf '%s\n' '提交信息只能有一行，不能包含正文或尾签。' >&2
+  printf '%s\n' "$EXTRA" | sed 's/^/  /' >&2
+  exit 1
+fi

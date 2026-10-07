@@ -1,0 +1,29 @@
+#!/usr/bin/env sh
+
+set -eu
+
+ROOT_DIR="$(git rev-parse --show-toplevel)"
+. "$ROOT_DIR/scripts/git-hooks/common.sh"
+cd "$ROOT_DIR"
+
+CHANGED_FILES="$(git diff --name-only ORIG_HEAD HEAD 2>/dev/null || true)"
+if [ -z "$CHANGED_FILES" ]; then
+  print_skip '合并后没有检测到文件差异。'
+  exit 0
+fi
+
+if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^\.githooks/|^scripts/install-git-hooks\.sh$'; then
+  if sh scripts/install-git-hooks.sh; then
+    printf '%s\n' 'Git hooks 已刷新。'
+  else
+    print_warn 'Git hooks 自动刷新失败，请执行：sh scripts/install-git-hooks.sh'
+  fi
+fi
+
+if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(pyproject\.toml|uv\.lock)$'; then
+  print_warn 'Python 依赖定义发生变化，请执行：uv sync --all-extras --all-groups'
+fi
+
+if printf '%s\n' "$CHANGED_FILES" | grep -Fxq '.openviking/config.json'; then
+  print_warn 'OpenViking 项目身份配置发生变化；请确认 MCP 连接已按当前工作区重新绑定。'
+fi

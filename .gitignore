@@ -16,3 +16,9 @@ htmlcov/
 .idea/
 .vscode/
 .DS_Store
+
+# OpenViking: commit the shared identity config, keep private overrides and generated data local.
+/.openviking/config.local.json
+/.openviking/downloads/
+/.openviking/cache/
+/.openviking/media/

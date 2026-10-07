@@ -1,0 +1,36 @@
+#!/usr/bin/env sh
+
+set -eu
+
+ROOT_DIR="$(git rev-parse --show-toplevel)"
+. "$ROOT_DIR/scripts/git-hooks/common.sh"
+cd "$ROOT_DIR"
+
+ensure_command uv || exit 1
+
+STAGED_PYTHON="$(git diff --cached --name-only --diff-filter=ACMR -- '*.py' || true)"
+if [ -z "$STAGED_PYTHON" ]; then
+  print_skip '没有暂存的 Python 文件，跳过 Ruff 检查。'
+  exit 0
+fi
+
+UNSTAGED_PYTHON="$(git diff --name-only --diff-filter=ACMR -- '*.py' || true)"
+PARTIALLY_STAGED="$(printf '%s\n' "$STAGED_PYTHON" | while IFS= read -r file; do
+  [ -n "$file" ] || continue
+  if printf '%s\n' "$UNSTAGED_PYTHON" | grep -Fxq "$file"; then
+    printf '%s\n' "$file"
+  fi
+done)"
+
+if [ -n "$PARTIALLY_STAGED" ]; then
+  print_error '暂存区与工作区同时修改了 Python 文件；请先整理为全量暂存，再提交。'
+  printf '%s\n' "$PARTIALLY_STAGED" | sed 's/^/  /' >&2
+  exit 1
+fi
+
+print_section '检查暂存的 Python 文件'
+printf '%s\n' "$STAGED_PYTHON" | while IFS= read -r file; do
+  [ -n "$file" ] || continue
+  uv run --no-sync ruff check "$file"
+  uv run --no-sync ruff format --check "$file"
+done

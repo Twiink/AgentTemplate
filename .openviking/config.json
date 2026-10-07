@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "peer": {
+    "id": "github.com-twiink-agenttemplate"
+  },
+  "recall": {
+    "peer_scope": "actor"
+  }
+}

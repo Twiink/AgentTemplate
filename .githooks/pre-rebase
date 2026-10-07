@@ -1,0 +1,32 @@
+#!/usr/bin/env sh
+
+set -eu
+
+ROOT_DIR="$(git rev-parse --show-toplevel)"
+. "$ROOT_DIR/scripts/git-hooks/common.sh"
+cd "$ROOT_DIR"
+
+REBASED_BRANCH=''
+if [ "$#" -ge 2 ] && [ -n "$2" ]; then
+  REBASED_BRANCH="$2"
+else
+  REBASED_BRANCH="$(current_git_branch)"
+fi
+
+if [ -z "$REBASED_BRANCH" ]; then
+  exit 0
+fi
+
+ALLOW_PROTECTED_REBASE="$(printenv AGENT_TEMPLATE_ALLOW_PROTECTED_REBASE 2>/dev/null || true)"
+if is_truthy "$ALLOW_PROTECTED_REBASE"; then
+  print_warn '已通过 AGENT_TEMPLATE_ALLOW_PROTECTED_REBASE=1 临时允许受保护分支 rebase。'
+  exit 0
+fi
+
+case "$REBASED_BRANCH" in
+  main|master|release/*)
+    print_error "禁止在受保护分支上直接执行 rebase：$REBASED_BRANCH"
+    printf '%s\n' '请切换到功能分支后再执行。确需操作时，可临时设置 AGENT_TEMPLATE_ALLOW_PROTECTED_REBASE=1。' >&2
+    exit 1
+    ;;
+esac
