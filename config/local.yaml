@@ -1,0 +1,2 @@
+# local 环境公共设置；部署身份和秘密由外部注入。
+environment: local

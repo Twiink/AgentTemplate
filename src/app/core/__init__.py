@@ -1,1 +1,1 @@
-"""Application configuration and shared core components."""
+"""工程基础模块；具体对象通过显式入口导入。"""

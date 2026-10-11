@@ -1,24 +1,37 @@
 .venv/
 __pycache__/
-*.py[cod]
-*.egg-info/
-build/
-dist/
-.env
-.env.*
-!.env.example
-.ruff_cache/
-.ty_cache/
-.mypy_cache/
+*.pyc
 .pytest_cache/
-.coverage
-htmlcov/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+.DS_Store
+.env
+.env.local
 .idea/
 .vscode/
-.DS_Store
 
-# OpenViking: commit the shared identity config, keep private overrides and generated data local.
-/.openviking/config.local.json
-/.openviking/downloads/
-/.openviking/cache/
-/.openviking/media/
+# 集成开发环境
+*.swp
+*.swo
+*~
+
+# 敏感配置
+.env.*
+!.env.example
+
+# 数据库文件
+*.db
+*.sqlite
+
+# 模型上下文协议配置
+mcp.json
+
+.codex
+
+# 私有初始化配置与本地持久数据不提交。
+config/private.yaml
+.data/
+.openviking/config.local.json
+.openviking/cache/

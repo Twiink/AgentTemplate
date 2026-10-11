@@ -1,3 +1,3 @@
-"""Agent Template backend package."""
+"""通用 Agent 工程底座；包导入不打开网络连接或注册业务实现。"""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

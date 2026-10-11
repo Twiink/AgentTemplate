@@ -1,1 +1,1 @@
-"""Application service layer."""
+"""通用工程基础服务。"""

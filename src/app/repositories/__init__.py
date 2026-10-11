@@ -1,1 +1,1 @@
-"""Data-access adapters for databases and external stores."""
+"""工程基础模块；具体对象通过显式入口导入。"""
