@@ -1,0 +1,14 @@
+# 外部依赖地址需要由生产 overlay 按实际网段收紧；默认仅限制入口。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-api-ingress
+spec:
+  podSelector:
+    matchLabels: {app: agent-api}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector: {}
+      ports:
+        - {protocol: TCP, port: 8000}

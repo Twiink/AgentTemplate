@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# Shared helpers for the repository's Git hooks.
+# 仓库 Git hooks 共用函数。
 
 print_section() {
   printf '\n▶ %s\n' "$1"
@@ -10,11 +10,11 @@ print_skip() {
 }
 
 print_warn() {
-  printf '⚠ %s\n' "$1" >&2
+  printf ' %s\n' "$1" >&2
 }
 
 print_error() {
-  printf '✗ %s\n' "$1" >&2
+  printf ' %s\n' "$1" >&2
 }
 
 ensure_command() {

@@ -1,0 +1,37 @@
+# scheduler 使用外部数据库、Redis 和 S3；只有 scheduler 保持单副本。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-scheduler
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: agent-scheduler}
+  template:
+    metadata:
+      labels: {app: agent-scheduler}
+    spec:
+      securityContext:
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: scheduler
+          image: agent-template:0.2.0
+          envFrom:
+            - configMapRef: {name: agent-config}
+            - secretRef: {name: agent-secrets}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: "2", memory: 2Gi}
+          volumeMounts:
+            - {name: data, mountPath: /opt/app/.data}
+          command: ["agent-template", "scheduler"]
+      volumes:
+        - name: data
+          emptyDir: {}

@@ -10,7 +10,7 @@ MESSAGE_FILE="${1:?commit message file is required}"
 FIRST_LINE="$(sed -n '1p' "$MESSAGE_FILE" | tr -d '\r')"
 TYPE_PATTERN='feat|fix|docs|style|refactor|perf|test|chore'
 
-# Allow Git-generated merge/revert and history-editing messages.
+# 允许 Git 自动生成的合并、回滚和历史编辑提交说明。
 if printf '%s' "$FIRST_LINE" | grep -Eq '^(Merge|Revert|fixup!|squash!|amend!) '; then
   exit 0
 fi

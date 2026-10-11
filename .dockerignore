@@ -1,0 +1,14 @@
+# 构建上下文仅保留运行源、公共配置及锁文件。
+.git
+.venv
+.data
+.env*
+config/private.yaml
+.openviking
+.codex
+__pycache__
+.pytest_cache
+.ruff_cache
+tests
+scripts
+*.patch

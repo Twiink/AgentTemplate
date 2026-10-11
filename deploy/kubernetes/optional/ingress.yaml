@@ -1,0 +1,15 @@
+# 域名和 TLS Secret 由部署环境替换；必须在外部反向代理终止 TLS。
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: agent-api
+spec:
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: agent-api
+                port: {number: 8000}

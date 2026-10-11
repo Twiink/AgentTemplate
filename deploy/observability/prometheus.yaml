@@ -1,0 +1,12 @@
+# 通过容器网络访问指标；不用用户、线程或请求 ID 作为标签。
+global:
+  scrape_interval: 15s
+rule_files: [/etc/prometheus/alerts.yaml]
+scrape_configs:
+  - job_name: agent-template
+    static_configs:
+      - targets: [api:8000]
+
+  - job_name: agent-worker
+    static_configs:
+      - targets: [worker:9005]

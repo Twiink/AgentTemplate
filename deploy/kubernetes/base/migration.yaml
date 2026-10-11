@@ -1,0 +1,33 @@
+# 发布前单次迁移；失败时阻止应用发布，不在 API 启动时修改结构。
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: agent-migrate
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      securityContext:
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: agent-template:0.2.0
+          envFrom:
+            - configMapRef: {name: agent-config}
+            - secretRef: {name: agent-secrets}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: "2", memory: 2Gi}
+          volumeMounts:
+            - {name: data, mountPath: /opt/app/.data}
+          command: [agent-template, migrate]
+      volumes:
+        - name: data
+          emptyDir: {}

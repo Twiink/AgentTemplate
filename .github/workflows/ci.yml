@@ -1,0 +1,60 @@
+name: 工程验收
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg18
+        env:
+          POSTGRES_USER: agent_owner
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: agenttemplate
+        ports: [5432:5432]
+        options: --health-cmd "pg_isready -U agent_owner" --health-interval 5s --health-retries 20
+      redis:
+        image: redis:8.2.1-alpine
+        ports: [6379:6379]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with: {version: 0.12.22}
+      - run: uv sync --locked
+      - run: uv run agent-template check
+      - name: 初始化真实 CI 数据库角色
+        env:
+          PGPASSWORD: ci-only-password
+        run: |
+          psql -h localhost -U agent_owner -d agenttemplate -c "CREATE ROLE agent_app LOGIN PASSWORD 'ci-only-password' NOSUPERUSER NOBYPASSRLS"
+          psql -h localhost -U agent_owner -d agenttemplate -c "ALTER DEFAULT PRIVILEGES GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO agent_app"
+          psql -h localhost -U agent_owner -d agenttemplate -c "ALTER DEFAULT PRIVILEGES GRANT USAGE, SELECT ON SEQUENCES TO agent_app"
+      - name: 执行版本迁移
+        env:
+          AGENT_DATABASE_URL: postgresql+asyncpg://agent_app:ci-only-password@localhost:5432/agenttemplate
+          AGENT_MIGRATION_DATABASE_URL: postgresql+asyncpg://agent_owner:ci-only-password@localhost:5432/agenttemplate
+        run: uv run agent-template migrate
+      - name: 真实数据库集成验收
+        env:
+          AGENT_TEST_DATABASE_URL: postgresql+asyncpg://agent_app:ci-only-password@localhost:5432/agenttemplate
+          AGENT_TEST_REDIS_URL: redis://localhost:6379/0
+        run: uv run pytest -q -m integration
+      - name: 构建生产镜像
+        run: docker build -t agent-template:${{ github.sha }} .
+      - uses: azure/setup-kubectl@v4
+      - name: 验证 Kustomize 配置
+        run: |
+          kubectl kustomize deploy/kubernetes/overlays/development > /tmp/development.yaml
+          kubectl kustomize deploy/kubernetes/overlays/production > /tmp/production.yaml
+
+      - name: 临时集群配置验收
+        run: |
+          curl -fsSL https://kind.sigs.k8s.io/dl/v0.33.0/kind-linux-amd64 -o /tmp/kind
+          chmod +x /tmp/kind
+          /tmp/kind create cluster --name agent-template
+          kubectl create namespace agent-development
+          kubectl create namespace agent-production
+          kubectl apply --dry-run=server -f /tmp/development.yaml
+          kubectl apply --dry-run=server -f /tmp/production.yaml
+          /tmp/kind delete cluster --name agent-template
