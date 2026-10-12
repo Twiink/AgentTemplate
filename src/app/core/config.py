@@ -47,11 +47,15 @@ class AuthConfig(StrictModel):
 
 
 class ModelProfile(StrictModel):
-    """独立聊天或向量模型配置；原生参数仅补充参数，不允许替换认证与治理字段。"""
+    """独立聊天或向量模型配置；原生参数仅补充参数，不允许替换认证与治理字段。
 
-    provider: Literal["openai", "anthropic", "gemini"]
+    openai_compatible 用于本地 Ollama、vLLM 等兼容接口：内部映射到 openai 客户端并传
+    endpoint，api_key 可选，不配置密钥即可通过校验。
+    """
+
+    provider: Literal["openai", "openai_compatible", "anthropic", "gemini"]
     model: str
-    api_key: SecretStr
+    api_key: SecretStr | None = None
     endpoint: str | None = None
     proxy: str | None = None
     timeout_seconds: float = Field(default=120, gt=0)
@@ -62,9 +66,8 @@ class ModelProfile(StrictModel):
     dimensions: int | None = Field(default=None, ge=1, le=16000)
     capabilities: set[str] = Field(default_factory=lambda: {"streaming", "tools", "structured"})
     parameters: dict[str, Any] = Field(default_factory=dict)
+    # 单价不写在这里，统一从 config/pricing.yaml 读取；此字段只标记计价基准版本。
     price_version: str | None = None
-    input_price_per_million: float | None = Field(default=None, ge=0)
-    output_price_per_million: float | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def check_parameters(self) -> ModelProfile:
@@ -87,10 +90,26 @@ class ModelProfile(StrictModel):
         }
         if reserved & self.parameters.keys():
             raise ValueError("模型透传参数包含受治理的保留字段")
-        if self.price_version is None and (
-            self.input_price_per_million is not None or self.output_price_per_million is not None
-        ):
-            raise ValueError("价格配置必须提供 price_version")
+        # 兼容接口必须给出 endpoint，否则无法确定实际请求地址。
+        if self.provider == "openai_compatible" and not self.endpoint:
+            raise ValueError("openai_compatible 必须配置 endpoint")
+        return self
+
+
+class LLMConfig(StrictModel):
+    """聊天与向量模型的别名白名单；别名之外的取值一律拒绝，避免任意模型名进入生产。"""
+
+    models: dict[str, ModelProfile] = Field(default_factory=dict)
+    embeddings: dict[str, ModelProfile] = Field(default_factory=dict)
+    default_embedding: str | None = None
+    # 价格表路径相对运行目录；留空使用 config/pricing.yaml。
+    pricing_file: Path = Path("config/pricing.yaml")
+
+    @model_validator(mode="after")
+    def check_default_embedding(self) -> LLMConfig:
+        """默认向量别名必须真实存在，避免运行到检索时才暴露配置错误。"""
+        if self.default_embedding and self.default_embedding not in self.embeddings:
+            raise ValueError("默认 Embedding 配置不存在")
         return self
 
 
@@ -186,9 +205,7 @@ class Settings(BaseSettings):
     redis_url: SecretStr = SecretStr("redis://localhost:6379/0")
     database_pool_size: int = Field(default=10, ge=1)
     auth: AuthConfig = Field(default_factory=AuthConfig)
-    chat_models: dict[str, ModelProfile] = Field(default_factory=dict)
-    embedding_models: dict[str, ModelProfile] = Field(default_factory=dict)
-    default_embedding: str | None = None
+    llm: LLMConfig = Field(default_factory=LLMConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     tools: ToolConfig = Field(default_factory=ToolConfig)
     mcp: dict[str, MCPServer] = Field(default_factory=dict)
@@ -235,7 +252,10 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_auth(self) -> Settings:
-        """生产配置必须具有可验证凭据；模型缺省允许基础服务先启动。"""
+        """生产配置必须具有可验证凭据；模型缺省允许基础服务先启动。
+
+        默认向量别名的存在性由 LLMConfig 负责，此处不重复校验。
+        """
         if self.environment == "production" and not (
             self.auth.api_keys or self.auth.jwt_key or self.auth.jwks_url
         ):
@@ -243,8 +263,6 @@ class Settings(BaseSettings):
         if self.auth.jwt_key or self.auth.jwks_url:
             if not self.auth.jwt_issuer or not self.auth.jwt_audience:
                 raise ValueError("JWT 必须配置 issuer 与 audience")
-        if self.default_embedding and self.default_embedding not in self.embedding_models:
-            raise ValueError("默认 Embedding 配置不存在")
         if self.tracing.capture_content and not self.redaction_patterns:
             raise ValueError("正文采集必须提供脱敏规则")
         return self

@@ -6,8 +6,11 @@ recursion_limit: 25
 lease_seconds: 60
 run_retention_days: 30
 registrations: []
-chat_models: {}
-embedding_models: {}
+# 模型别名白名单：只有这里声明的别名才能被引用；单价统一来自 config/pricing.yaml。
+llm:
+  models: {}
+  embeddings: {}
+  default_embedding: null
 tracing:
   enabled: false
   capture_content: false

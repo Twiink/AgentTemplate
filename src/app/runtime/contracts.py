@@ -51,8 +51,13 @@ class RunContext:
             f"{self.principal.tenant_id}\0{self.principal.subject_id}\0{self.thread_id}".encode()
         ).hexdigest()
 
-    def reserve(self, estimated_input: int, max_output: int, profile: Any) -> None:
-        """调用前检查剩余时间、上下文及总预算；估算与服务商 usage 分别保留。"""
+    def reserve(
+        self, estimated_input: int, max_output: int, profile: Any, price: Any = None
+    ) -> None:
+        """调用前检查剩余时间、上下文及总预算；估算与服务商 usage 分别保留。
+
+        price 为价格表命中的单价；费用预算必须有价格，缺失时明确拒绝而不是按 0 计费。
+        """
         if time.monotonic() >= self.deadline:
             raise AppError("run_timeout", "运行已超过时间预算")
         if estimated_input + max_output > profile.context_tokens:
@@ -61,17 +66,18 @@ class RunContext:
         if used + estimated_input + max_output > self.token_budget:
             raise AppError("token_budget", "运行 Token 预算不足")
         if self.cost_budget is not None:
-            if profile.input_price_per_million is None or profile.output_price_per_million is None:
-                raise AppError("pricing_required", "费用预算要求配置完整价格和版本")
+            if price is None:
+                raise AppError("pricing_required", "费用预算要求价格表收录该模型")
             projected = (
-                estimated_input * profile.input_price_per_million
-                + max_output * profile.output_price_per_million
+                estimated_input * price.input_per_million + max_output * price.output_per_million
             ) / 1_000_000
             if (self.usage["cost"] or 0) + projected > self.cost_budget:
                 raise AppError("cost_budget", "运行费用预算不足")
         self.reserved_tokens += estimated_input + max_output
 
-    def record_usage(self, value: dict[str, Any] | None, estimated: int, profile: Any) -> None:
+    def record_usage(
+        self, value: dict[str, Any] | None, estimated: int, profile: Any, price: Any = None
+    ) -> None:
         """记录真实用量；未知值保持 None，单独计入保守估算以防无 usage 绕过预算。"""
         self.reserved_tokens = max(0, self.reserved_tokens - estimated)
         self.usage["calls"] += 1
@@ -84,14 +90,10 @@ class RunContext:
             self.usage["input_tokens"] = (self.usage["input_tokens"] or 0) + int(incoming)
             self.usage["output_tokens"] = (self.usage["output_tokens"] or 0) + int(outgoing)
             self.usage["estimated_tokens"] += int(incoming) + int(outgoing)
-            if (
-                profile.price_version
-                and profile.input_price_per_million is not None
-                and profile.output_price_per_million is not None
-            ):
+            if price is not None:
                 self.usage["cost"] = (self.usage["cost"] or 0) + (
-                    int(incoming) * profile.input_price_per_million
-                    + int(outgoing) * profile.output_price_per_million
+                    int(incoming) * price.input_per_million
+                    + int(outgoing) * price.output_per_million
                 ) / 1_000_000
         if self.usage["estimated_tokens"] > self.token_budget:
             raise AppError("token_budget", "运行已超过 Token 预算")

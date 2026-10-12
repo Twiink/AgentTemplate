@@ -92,7 +92,7 @@ class Container:
         self.stack.push_async_callback(self.redis.aclose)
         proxies = {
             p.proxy or ""
-            for p in [*self.settings.chat_models.values(), *self.settings.embedding_models.values()]
+            for p in [*self.settings.llm.models.values(), *self.settings.llm.embeddings.values()]
         } | {""}
         self.http = {}
         for proxy in proxies:

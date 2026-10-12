@@ -14,8 +14,9 @@ FastAPI lifespan、CLI 和 Worker 任务使用资源容器 `Container`（`app.co
 | `database_url` | 非超级用户、无 BYPASSRLS 的运行连接 |
 | `migration_database_url` | 单独迁移连接 |
 | `redis_url` | Celery 队列、限流与通知 |
-| `chat_models`／`embedding_models` | 独立模型配置字典 |
-| `default_embedding` | 默认向量配置名称 |
+| `llm.models`／`llm.embeddings` | 模型别名白名单，只有这里声明的别名才能被引用 |
+| `llm.default_embedding` | 默认向量别名；必须存在于 `llm.embeddings` |
+| `llm.pricing_file` | 价格表路径，默认 `config/pricing.yaml`，单价不在别名下重复填写 |
 | `registrations` | 项目注册函数引用列表 |
 | `auth.api_keys` | Key SHA-256 摘要、稳定 tenant／subject／scopes |
 | `auth.jwt_*`／`auth.jwks_url` | 签名算法、密钥或 JWKS、issuer、audience |

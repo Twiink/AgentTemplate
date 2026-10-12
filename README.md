@@ -60,7 +60,7 @@ API 文档位于 `/docs`。资源接口使用 `/api/v1`，必须携带 `Authoriz
 
 配置顺序为基础默认值、预设、环境 YAML、私有 YAML、`AGENT_*` 环境变量、程序显式覆盖。嵌套环境变量使用双下划线，字典和列表使用 JSON。未知字段直接报错。
 
-配置与公共契约详见 [开发契约](docs/development.md)。常用配置包括 `preset`、`modules`、`chat_models`、`embedding_models`、`registrations`、`auth`、`storage`、`tools`、`mcp` 和 `tracing`。聊天与向量模型单独注册；业务 Prompt 放在 `prompts` 目录并按内容摘要记录版本。
+配置与公共契约详见 [开发契约](docs/development.md)。常用配置包括 `preset`、`modules`、`llm`（模型别名白名单与价格表路径）、`registrations`、`auth`、`storage`、`tools`、`mcp` 和 `tracing`。聊天与向量模型按别名声明，只有白名单内的别名才能被引用；业务 Prompt 放在 `prompts` 目录并按内容摘要记录版本。
 
 项目通过 `registrations` 中的 `模块:函数` 入口注册 `AgentRegistration`；入口接收资源容器 `Container`。工厂接收 `RunContext` 和模板 Checkpointer，返回原生图或 Workflow。API 和 Worker 使用同样的注册配置。详情见 [框架与恢复约定](docs/development.md)。
 

@@ -73,6 +73,50 @@ def nearest_existing(path: Path) -> Path:
     return current
 
 
+def check_models(settings: Settings) -> list[CheckResult]:
+    """逐个别名输出配置状态；不发起收费调用，只在缺少配置或价格时给出提示。"""
+    from app.llm.pricing import load_pricing
+
+    models, embeddings = settings.llm.models, settings.llm.embeddings
+    if not models and not embeddings:
+        return [
+            CheckResult(
+                "模型",
+                "warning",
+                "未配置任何模型别名，基础服务可以启动，Agent 运行前需要配置",
+                "在 config/private.yaml 的 llm.models 与 llm.embeddings 中添加别名",
+                blocking=False,
+            )
+        ]
+    table = load_pricing(settings.llm.pricing_file)
+    results = []
+    for kind, alias_table in (("聊天", models), ("向量", embeddings)):
+        for alias, profile in alias_table.items():
+            provider = "openai" if profile.provider == "openai_compatible" else profile.provider
+            notes = []
+            if profile.api_key is None and profile.provider != "openai_compatible":
+                # 只有兼容接口允许不带密钥，其他服务商缺密钥会在首次调用时失败。
+                notes.append("未配置密钥")
+            if table.get(provider, profile.model) is None and profile.price_version is not None:
+                notes.append("价格表未收录")
+            status: Status = "warning" if notes else "passed"
+            message = f"{profile.provider}/{profile.model}"
+            if notes:
+                message += "（" + "、".join(notes) + "）"
+            results.append(
+                CheckResult(
+                    f"{kind}模型 {alias}",
+                    status,
+                    message,
+                    f"在 config/pricing.yaml 中补充 {provider}/{profile.model} 的单价"
+                    if "价格表未收录" in notes
+                    else None,
+                    blocking=False,
+                )
+            )
+    return results
+
+
 def check_configuration(settings: Settings) -> list[CheckResult]:
     """配置已通过加载校验；这里补充私有配置文件权限与模型配置情况。"""
     files = [source for source in settings.config_sources if source.endswith(".yaml")]
@@ -89,16 +133,7 @@ def check_configuration(settings: Settings) -> list[CheckResult]:
                     blocking=False,
                 )
             )
-    if not settings.chat_models:
-        results.append(
-            CheckResult(
-                "模型",
-                "warning",
-                "未配置聊天模型，基础服务可以启动，Agent 运行前需要配置",
-                "在 config/private.yaml 的 chat_models 中添加模型",
-                blocking=False,
-            )
-        )
+    results.extend(check_models(settings))
     return results
 
 

@@ -1,7 +1,7 @@
-"""模型网关：统一 init_chat_model 接入，支持别名、可选密钥与价格配置。
+"""模型网关：统一 init_chat_model 接入，支持别名白名单、可选密钥与价格表。
 
-阶段 3.1：移除 GovernedChatModel，使用 init_chat_model；LlamaIndex 适配保留到 3.2。
-阶段 3.4：中间件治理接入后，本模块只负责模型初始化与定价。
+初始化只做装配，不发起网络调用；密钥、超时、重试等受治理字段由网关统一注入，
+配置中的 parameters 不能覆盖它们。
 """
 
 from __future__ import annotations
@@ -13,26 +13,72 @@ from langchain.chat_models import init_chat_model
 from langchain_core.language_models.chat_models import BaseChatModel
 
 from app.core.errors import AppError
-from app.llm.tokens import estimate_messages
+from app.llm.pricing import PricingTable, load_pricing, require_price
+
+# 模板内的 provider 取值到 init_chat_model 原生 provider 的映射。
+# openai_compatible 复用 openai 客户端并通过 base_url 指向兼容端点，
+# init_chat_model 的 _BUILTIN_PROVIDERS 中没有该名字，不能直接透传。
+PROVIDER_ALIASES = {
+    "openai": "openai",
+    "openai_compatible": "openai",
+    "anthropic": "anthropic",
+    "gemini": "google_genai",
+}
 
 
 class ModelGateway:
-    """模型注册表：init_chat_model 统一初始化，LlamaIndex 适配保留到 3.2 删除。"""
+    """模型注册表：按别名初始化聊天与向量模型，并提供价格查询。"""
 
     def __init__(self, settings, http, telemetry):
         self.settings, self.http, self.telemetry = settings, http, telemetry
-        self._models, self._embeddings, self._llama = {}, {}, {}
-        self._limits = {}
+        self._models, self._embeddings = {}, {}
+        self._limits: dict[str, asyncio.Semaphore] = {}
+        self.pricing: PricingTable = load_pricing(settings.llm.pricing_file)
 
     def profile(self, name: str, *, embedding: bool = False):
-        """取得已声明配置；Embedding 需要显式维度。"""
-        table = self.settings.embedding_models if embedding else self.settings.chat_models
+        """取得已声明配置；别名不在白名单内时拒绝，不做隐式回退。"""
+        table = self.settings.llm.embeddings if embedding else self.settings.llm.models
         if name not in table:
-            raise AppError("model_not_configured", "模型配置不存在", 503)
+            raise AppError("model_not_configured", "模型别名未在配置中声明", 503)
         profile = table[name]
         if embedding and (not profile.dimensions or profile.provider == "anthropic"):
             raise AppError("embedding_configuration", "向量模型必须支持 Embedding 并声明维度", 503)
         return profile
+
+    def price_for(self, profile):
+        """按模型配置查询单价；provider 先做兼容别名归一，未收录时返回 None。
+
+        声明了 price_version 的模型必须能在价格表命中，否则视为配置错误。
+        """
+        provider = "openai" if profile.provider == "openai_compatible" else profile.provider
+        if profile.price_version is not None:
+            return require_price(self.pricing, provider, profile.model, profile.price_version)
+        return self.pricing.get(provider, profile.model)
+
+    def price(self, name: str, *, embedding: bool = False):
+        """按别名查询单价；用于预算检查与调用后计费。"""
+        return self.price_for(self.profile(name, embedding=embedding))
+
+    def status(self) -> list[dict[str, Any]]:
+        """列出每个别名的配置状态；预检据此逐项输出，不发起收费调用。"""
+        items = []
+        for kind, table in (
+            ("chat", self.settings.llm.models),
+            ("embedding", self.settings.llm.embeddings),
+        ):
+            for name, profile in table.items():
+                provider = "openai" if profile.provider == "openai_compatible" else profile.provider
+                items.append(
+                    {
+                        "alias": name,
+                        "kind": kind,
+                        "provider": profile.provider,
+                        "model": profile.model,
+                        "has_key": profile.api_key is not None,
+                        "priced": self.pricing.get(provider, profile.model) is not None,
+                    }
+                )
+        return items
 
     def chat(self, name: str, required: set[str] | None = None):
         """返回 LangChain BaseChatModel；使用 init_chat_model 初始化，中间件治理接管预算。"""
@@ -40,19 +86,18 @@ class ModelGateway:
         if required and not required <= p.capabilities:
             raise AppError("unsupported_capability", "模型能力声明不满足请求")
         if name not in self._models:
-            # init_chat_model 的 model_provider 参数格式：provider:model
-            kwargs = {
+            kwargs: dict[str, Any] = {
                 "model": p.model,
-                "model_provider": p.provider,
+                "model_provider": PROVIDER_ALIASES[p.provider],
                 "max_tokens": p.max_output_tokens,
                 "timeout": p.timeout_seconds,
                 "max_retries": p.retries,
             }
-            if p.endpoint and p.provider == "openai":
+            # 兼容接口通过 base_url 指向本地端点；只有声明了密钥才注入，本地服务无需凭据。
+            if p.endpoint:
                 kwargs["base_url"] = p.endpoint
             if p.api_key:
                 kwargs["api_key"] = p.api_key.get_secret_value()
-            # parameters 透传给底层提供商
             kwargs.update(p.parameters)
 
             self._models[name] = init_chat_model(**kwargs)
@@ -66,24 +111,27 @@ class ModelGateway:
         """返回 LangChain 原生 Embeddings；向量请求由 embed 方法提供治理。"""
         p = self.profile(name, embedding=True)
         if name not in self._embeddings:
-            if p.provider == "openai":
+            if p.provider in {"openai", "openai_compatible"}:
                 from langchain_openai import OpenAIEmbeddings
 
                 kwargs = dict(
                     model=p.model,
-                    api_key=p.api_key.get_secret_value(),
                     base_url=p.endpoint,
                     request_timeout=p.timeout_seconds,
                     max_retries=p.retries,
                     http_async_client=self.http_for(p),
                     **p.parameters,
                 )
+                if p.api_key:
+                    kwargs["api_key"] = p.api_key.get_secret_value()
                 if p.model.startswith("text-embedding-3"):
                     kwargs["dimensions"] = p.dimensions
                 self._embeddings[name] = OpenAIEmbeddings(**kwargs)
             else:
                 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
+                if not p.api_key:
+                    raise AppError("model_not_configured", "Gemini 向量模型必须配置密钥", 503)
                 self._embeddings[name] = GoogleGenerativeAIEmbeddings(
                     model=p.model,
                     google_api_key=p.api_key.get_secret_value(),
@@ -103,109 +151,12 @@ class ModelGateway:
             raise AppError("embedding_dimensions", "服务商返回的向量维度不匹配")
         return vectors
 
-    # ============ LlamaIndex 适配：阶段 3.2 删除 ============
-
-    def llama_chat(self, name: str):
-        """返回独立的 LlamaIndex FunctionCallingLLM；阶段 3.2 删除。"""
-        from app.llm.llama import GovernedLlamaModel
-
-        p = self.profile(name)
-        if name not in self._llama:
-            if p.provider == "openai":
-                from llama_index.llms.openai_like import OpenAILike
-
-                native = OpenAILike(
-                    model=p.model,
-                    api_key=p.api_key.get_secret_value(),
-                    api_base=p.endpoint,
-                    async_http_client=self.http_for(p),
-                    timeout=p.timeout_seconds,
-                    max_retries=p.retries,
-                    max_tokens=p.max_output_tokens,
-                    context_window=p.context_tokens,
-                    is_chat_model=True,
-                    is_function_calling_model="tools" in p.capabilities,
-                    additional_kwargs=p.parameters,
-                )
-            elif p.provider == "anthropic":
-                from llama_index.llms.anthropic import Anthropic
-
-                native = Anthropic(
-                    model=p.model,
-                    api_key=p.api_key.get_secret_value(),
-                    base_url=p.endpoint,
-                    timeout=p.timeout_seconds,
-                    max_retries=p.retries,
-                    max_tokens=p.max_output_tokens,
-                    additional_kwargs=p.parameters,
-                )
-                import anthropic
-
-                native._aclient = anthropic.AsyncAnthropic(
-                    api_key=p.api_key.get_secret_value(),
-                    base_url=p.endpoint,
-                    timeout=p.timeout_seconds,
-                    max_retries=p.retries,
-                    http_client=self.http_for(p),
-                )
-            else:
-                from google.genai.types import HttpOptions
-                from llama_index.llms.google_genai import GoogleGenAI
-
-                native = GoogleGenAI(
-                    model=p.model,
-                    api_key=p.api_key.get_secret_value(),
-                    max_tokens=p.max_output_tokens,
-                    max_retries=p.retries,
-                    context_window=p.context_tokens,
-                    http_options=HttpOptions(
-                        base_url=p.endpoint,
-                        timeout=int(p.timeout_seconds * 1000),
-                        async_client_args={"proxy": p.proxy} if p.proxy else {},
-                    ),
-                    **p.parameters,
-                )
-            self._llama[name] = GovernedLlamaModel(
-                native, p, asyncio.Semaphore(p.concurrency), self.telemetry
-            )
-        return self._llama[name]
-
-    def llama_embedding(self, name: str):
-        """返回 LlamaIndex 原生 BaseEmbedding；阶段 3.2 删除。"""
-        p = self.profile(name, embedding=True)
-        if p.provider == "openai":
-            from llama_index.embeddings.openai import OpenAIEmbedding
-
-            return OpenAIEmbedding(
-                model=p.model,
-                api_key=p.api_key.get_secret_value(),
-                api_base=p.endpoint,
-                async_http_client=self.http_for(p),
-                timeout=p.timeout_seconds,
-                max_retries=p.retries,
-                dimensions=p.dimensions if p.model.startswith("text-embedding-3") else None,
-                additional_kwargs=p.parameters,
-            )
-        from google.genai.types import EmbedContentConfig, HttpOptions
-        from llama_index.embeddings.google_genai import GoogleGenAIEmbedding
-
-        return GoogleGenAIEmbedding(
-            model_name=p.model,
-            api_key=p.api_key.get_secret_value(),
-            embedding_config=EmbedContentConfig(output_dimensionality=p.dimensions),
-            retries=p.retries,
-            timeout=int(p.timeout_seconds),
-            http_options=HttpOptions(
-                base_url=p.endpoint, async_client_args={"proxy": p.proxy} if p.proxy else {}
-            ),
-            **p.parameters,
-        )
-
     async def close(self):
         """关闭模板创建的原生 SDK 客户端；代理 HTTP 共享客户端由外层退出栈负责。"""
         visited = set()
-        for wrapper in [*self._models.values(), *self._llama.values()]:
-            native = wrapper if isinstance(wrapper, BaseChatModel) else wrapper.native
+        for model in self._models.values():
+            if not isinstance(model, BaseChatModel):
+                continue
             for name in [
                 "_async_client",
                 "_aclient",
@@ -215,7 +166,7 @@ class ModelGateway:
                 "root_client",
                 "client",
             ]:
-                client = getattr(native, name, None)
+                client = getattr(model, name, None)
                 if client is None or id(client) in visited:
                     continue
                 visited.add(id(client))
