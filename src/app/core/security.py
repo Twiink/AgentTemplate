@@ -1,4 +1,4 @@
-"""验证 API Key 和 JWT，并产生所有服务共享的认证主体。"""
+"""验证 API Key 和 JWT，并产生所有服务共享的认证主体；限流在 app.core.ratelimit 中独立执行。"""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from functools import cached_property
 
 import jwt
+import structlog
 from fastapi import Request
 
 from app.core.config import AuthConfig
@@ -22,6 +23,8 @@ class Principal:
     tenant_id: str
     subject_id: str
     scopes: frozenset[str]
+    # API Key 摘要前 8 位，只用于日志关联调用方，不能反推出原始凭据；JWT 身份为 None。
+    key_prefix: str | None = None
 
     def require(self, scope: str) -> None:
         """拒绝缺少所需权限的操作；抛出不包含凭据的 403 错误。"""
@@ -47,7 +50,9 @@ class Authenticator:
         digest = hashlib.sha256(token.encode()).hexdigest()
         for entry in self.config.api_keys:
             if hmac.compare_digest(digest, entry.digest):
-                return Principal(entry.tenant_id, entry.subject_id, frozenset(entry.scopes))
+                return Principal(
+                    entry.tenant_id, entry.subject_id, frozenset(entry.scopes), entry.digest[:8]
+                )
         if not (self.config.jwt_key or self.config.jwks_url):
             raise AppError("unauthorized", "凭据无效或认证未配置", 401)
         try:
@@ -81,19 +86,15 @@ class Authenticator:
 
 
 async def current_principal(request: Request) -> Principal:
-    """FastAPI 身份依赖；拒绝匿名访问，并按可信主体实施 Redis 限流。"""
+    """FastAPI 身份依赖；拒绝匿名访问，并把可信身份写入日志上下文。"""
     header = request.headers.get("authorization", "")
     if not header.startswith("Bearer "):
         raise AppError("unauthorized", "需要 Bearer 凭据", 401)
     principal = await request.app.state.authenticator.verify(header[7:])
     request.state.principal = principal
-    resources = request.app.state.resources
-    key = hashlib.sha256(f"{principal.tenant_id}:{principal.subject_id}".encode()).hexdigest()
-    count = await resources.redis.eval(
-        "local n=redis.call('INCR',KEYS[1]); if n==1 then redis.call('EXPIRE',KEYS[1],60) end; return n",
-        1,
-        "rate:" + key,
+    structlog.contextvars.bind_contextvars(
+        tenant_id=principal.tenant_id,
+        subject_id=principal.subject_id,
+        key_prefix=principal.key_prefix,
     )
-    if count > resources.settings.rate_limit_per_minute:
-        raise AppError("rate_limited", "请求过于频繁", 429, True)
     return principal

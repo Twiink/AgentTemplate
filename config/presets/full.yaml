@@ -1,0 +1,6 @@
+# full 预设：在 minimal 基础上增加后台运行、RAG 知识库和长期记忆。
+modules:
+  - storage
+  - background
+  - knowledge
+  - memory

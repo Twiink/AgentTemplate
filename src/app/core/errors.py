@@ -49,6 +49,6 @@ def register_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(Exception)
     async def unexpected_error(request: Request, error: Exception):
-        """只记录异常类别；异常文本可能包含秘密，交由显式脱敏诊断处理。"""
-        app.state.logger.error("请求处理失败", exception_type=type(error).__name__)
+        """日志记录完整堆栈，经脱敏处理器后写出；响应只返回固定信息和请求 ID。"""
+        app.state.logger.error("请求处理失败", exception_type=type(error).__name__, exc_info=error)
         return reply(request, "internal_error", "请求处理失败", 500)

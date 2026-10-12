@@ -18,8 +18,8 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 from app.core.config import load_settings
+from app.core.container import Container
 from app.core.errors import AppError
-from app.core.resources import Resources
 from app.core.security import Authenticator
 from app.db.models import Run
 
@@ -105,18 +105,21 @@ async def evaluate_dataset(
     principal.require("resources:write")
     principal.require("resources:read")
     results: list[dict[str, Any]] = []
-    async with Resources(settings) as resources:
+    async with Container(settings) as resources:
+        if resources.background is None:
+            raise AppError("evaluation_requires_background", "评测需要启用 background 模块")
+        background = resources.background
         for case in cases:
             started = time.monotonic()
-            thread = await resources.data.create_thread(principal)
+            thread = await resources.threads.create(principal)
             registration = resources.agents.get(case.agent_id)
-            submitted = await resources.runs.submit(
+            submitted = await background.submit(
                 principal, case.agent_id, thread["id"], case.input, case.options
             )
             await resources.runs.execute(submitted["id"])
             # 如果后台 Worker 已先领取，等待同一持久运行，而不是启动第二份评估。
             while True:
-                run = await resources.data.get(Run, submitted["id"], principal)
+                run = await resources.repository.get(Run, submitted["id"], principal)
                 if run["status"] in {"succeeded", "failed", "cancelled", "waiting_input"}:
                     break
                 if (

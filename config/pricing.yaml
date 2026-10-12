@@ -1,0 +1,42 @@
+# 模型定价配置：按服务商、模型名声明输入输出单价（美元/百万 token）。
+# 用于成本预算与实时计费；缺失价格的模型只能使用 token 预算。
+
+pricing:
+  # OpenAI 价格（2026年10月基准）
+  openai:
+    gpt-4o:
+      input: 2.50
+      output: 10.00
+    gpt-4o-mini:
+      input: 0.15
+      output: 0.60
+    o1-preview:
+      input: 15.00
+      output: 60.00
+    o1-mini:
+      input: 3.00
+      output: 12.00
+
+  # Anthropic 价格
+  anthropic:
+    claude-opus-5-5:
+      input: 15.00
+      output: 75.00
+    claude-sonnet-5-5:
+      input: 3.00
+      output: 15.00
+    claude-haiku-5-5:
+      input: 0.25
+      output: 1.25
+
+  # Google 价格
+  google:
+    gemini-2.0-flash-exp:
+      input: 0.00
+      output: 0.00
+    gemini-1.5-pro:
+      input: 1.25
+      output: 5.00
+    gemini-1.5-flash:
+      input: 0.075
+      output: 0.30

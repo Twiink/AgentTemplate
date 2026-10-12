@@ -1,12 +1,37 @@
-"""身份事务工厂；使用 SET LOCAL 防止连接池复用时租户身份泄漏。"""
+"""身份事务工厂；使用 SET LOCAL 防止连接池复用时租户身份泄漏，并记录超过阈值的慢查询。"""
 
+import time
 from contextlib import asynccontextmanager
 
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+import structlog
+from sqlalchemy import event, text
+from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 from app.core.config import Settings
 from app.core.security import Principal
+
+
+def watch_slow_queries(engine: AsyncEngine, threshold_ms: int) -> None:
+    """记录执行时间超过阈值的 SQL；只记语句模板和耗时，参数值可能含业务数据，不写入日志。"""
+    logger = structlog.get_logger("app.db")
+
+    @event.listens_for(engine.sync_engine, "before_cursor_execute")
+    def started(conn, cursor, statement, parameters, context, executemany):
+        """在本次执行上下文上记下开始时间；执行上下文随语句结束释放，失败时不会累积。"""
+        if context is not None:
+            context.agent_query_started = time.perf_counter()
+
+    @event.listens_for(engine.sync_engine, "after_cursor_execute")
+    def finished(conn, cursor, statement, parameters, context, executemany):
+        """计算耗时，超过阈值时写一条警告。"""
+        began = getattr(context, "agent_query_started", None)
+        if began is None:
+            return
+        elapsed = (time.perf_counter() - began) * 1000
+        if elapsed >= threshold_ms:
+            logger.warning(
+                "慢查询", elapsed_ms=round(elapsed, 1), statement=" ".join(statement.split())[:1000]
+            )
 
 
 class Database:
@@ -19,6 +44,8 @@ class Database:
             max_overflow=0,
             pool_pre_ping=True,
         )
+        if settings.slow_query_ms:
+            watch_slow_queries(self.engine, settings.slow_query_ms)
         self.factory = async_sessionmaker(self.engine, expire_on_commit=False)
 
     @asynccontextmanager

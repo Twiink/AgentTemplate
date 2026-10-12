@@ -4,22 +4,29 @@ version = "0.2.0"
 description = "通用 Agent 开发工程底座"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
+# 核心依赖：两档都需要。模块专属依赖放在 optional-dependencies，按预设安装。
 dependencies = [
   "alembic>=1.20,<2", "asyncpg>=0.32,<1", "sqlalchemy[asyncio]>=2.1,<3",
-  "psycopg[binary,pool]>=3.3,<4", "pgvector>=0.5,<1", "redis>=8.1,<9",
+  "psycopg[binary,pool]>=3.3,<4", "redis>=8.1,<9",
   "fastapi[standard]>=0.142,<1", "httpx>=0.28,<1", "aiohttp>=3.13,<4", "jsonschema>=4.26,<5", "sqlglot>=28,<32", "pydantic-settings>=2.15,<3",
   "pyyaml>=6,<7", "structlog>=26,<27", "prometheus-client>=0.26,<1",
-  "celery[redis]>=5.6,<6", "pyjwt[crypto]>=2.15,<3", "typer>=0.24,<1",
-  "langchain>=1.4,<2", "langgraph>=1.2,<2", "langgraph-checkpoint-postgres>=3.1,<4",
+  "pyjwt[crypto]>=2.15,<3", "typer>=0.24,<1",
+  "langchain[mcp]>=1.4,<2", "langgraph>=1.2,<2", "langgraph-checkpoint-postgres>=3.1,<4",
   "langchain-openai>=1,<2", "langchain-anthropic>=1,<2", "langchain-google-genai>=4,<5",
   "llama-index-core>=0.14,<1", "llama-index-llms-openai>=0.6,<1",
   "llama-index-llms-openai-like>=0.6,<1", "llama-index-llms-anthropic>=0.10,<1",
   "llama-index-llms-google-genai>=0.8,<1", "llama-index-embeddings-openai>=0.5,<1",
   "llama-index-embeddings-google-genai>=0.3,<1", "mcp>=2.3,<3",
-  "boto3>=1.42,<2", "pypdf>=6,<7", "python-docx>=1.2,<2", "beautifulsoup4>=4.14,<5",
   "opentelemetry-sdk>=1.39,<2", "opentelemetry-exporter-otlp-proto-http>=1.39,<2",
   "opentelemetry-instrumentation-fastapi>=0.60b0,<1", "langsmith>=0.14,<1",
 ]
+
+# minimal 只安装核心依赖；full 安装全部模块依赖：uv sync --extra full。
+[project.optional-dependencies]
+background = ["celery[redis]>=5.6,<6"]
+knowledge = ["pgvector>=0.5,<1", "pypdf>=6,<7", "python-docx>=1.2,<2", "beautifulsoup4>=4.14,<5"]
+s3 = ["boto3>=1.42,<2"]
+full = ["agent-template[background,knowledge,s3]"]
 
 [project.scripts]
 agent-template = "app.cli:cli"
@@ -32,7 +39,7 @@ build-backend = "uv_build"
 module-name = "app"
 
 [dependency-groups]
-dev = ["pytest>=9.1,<10", "pytest-asyncio>=1.3,<2", "ruff>=0.16,<1", "ty>=0.0.85,<1"]
+dev = ["ruff>=0.16,<1", "ty>=0.0.85,<1"]
 
 [tool.fastapi]
 entrypoint = "app.main:app"
@@ -43,8 +50,3 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "I", "UP", "B"]
-
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-testpaths = ["tests"]
-markers = ["integration: 需要真实 PostgreSQL、Redis 等基础设施", "providers: 显式启用真实收费服务商验收"]

@@ -1,126 +1,70 @@
-"""FastAPI 应用工厂；共享资源在 lifespan 中建立并逆序关闭，导入不产生外部连接。"""
+"""FastAPI 应用工厂：启动预检通过后在 lifespan 中建立资源容器，按启用的模块追加路由。
+
+导入不产生外部连接；模块路由在创建应用时按配置决定，资源在 lifespan 中建立并逆序关闭。
+"""
 
 from __future__ import annotations
 
-import time
+import asyncio
 from contextlib import asynccontextmanager
-from uuid import uuid4
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
-from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, generate_latest, multiprocess
 
-from app.api.routes import router
+from app import __version__
+from app.api import health
+from app.api import v1 as api_v1
+from app.api.middleware import install_request_context
 from app.core.config import load_settings
+from app.core.container import Container
 from app.core.errors import register_exception_handlers
-from app.core.observability import latency, requests, setup_logging
-from app.core.resources import Resources
-from app.core.security import Authenticator, current_principal
-from app.services.health import diagnostics
+from app.core.logging import setup_logging
+from app.core.preflight import require_preflight
+from app.core.security import Authenticator
+from app.modules import load, resolve
+from app.services.health import ReadinessCache, run_metrics_collector
 
 
 def create_app(config_override=None) -> FastAPI:
-    """以显式覆盖生成独立应用；测试与嵌入式调用不会共享全局 Settings。"""
+    """以显式覆盖生成独立应用；嵌入式调用不会共享全局 Settings。"""
     settings = load_settings(config_override)
+    logger = setup_logging(settings)
+    modules = [load(info) for info in resolve(settings.modules)]
 
     @asynccontextmanager
     async def lifespan(application):
-        """基础连接可延迟失败，由 ready 报告；初始化异常同样释放部分成功的资源。"""
-        resources = Resources(settings)
-        try:
-            async with resources:
-                application.state.resources = resources
+        """先执行启动预检，再建立资源与后台指标采集；预检失败时应用不会开始接收请求。"""
+        if settings.preflight.enabled:
+            await require_preflight(settings, logger)
+        async with Container(settings) as container:
+            application.state.container = container
+            collector = asyncio.create_task(run_metrics_collector(container))
+            try:
                 yield
-        finally:
-            await resources.stack.aclose()
+            finally:
+                collector.cancel()
+                await asyncio.gather(collector, return_exceptions=True)
 
-    application = FastAPI(title=settings.app_name, version="0.2.0", lifespan=lifespan)
+    application = FastAPI(title=settings.app_name, version=__version__, lifespan=lifespan)
     application.state.settings = settings
     application.state.authenticator = Authenticator(settings.auth)
-    application.state.logger = setup_logging(settings)
+    application.state.logger = logger
+    application.state.readiness = ReadinessCache()
     application.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
         allow_credentials=False,
         allow_methods=["GET", "POST", "PUT", "DELETE"],
-        allow_headers=["Authorization", "Content-Type", "Last-Event-ID"],
+        allow_headers=["Authorization", "Content-Type", "Last-Event-ID", "X-Request-ID"],
     )
     register_exception_handlers(application)
-    application.include_router(router)
-
-    @application.middleware("http")
-    async def correlation(request: Request, call_next):
-        """服务器生成请求 ID，按路由模板统计指标，避免原始路径造成高基数。"""
-        request.state.request_id = str(uuid4())
-        started = time.monotonic()
-        response = await call_next(request)
-        route = getattr(request.scope.get("route"), "path", "unmatched")
-        requests.labels(request.method, route, str(response.status_code)).inc()
-        latency.labels(request.method, route).observe(time.monotonic() - started)
-        response.headers["X-Request-ID"] = request.state.request_id
-        application.state.logger.info(
-            "接口请求完成",
-            request_id=request.state.request_id,
-            method=request.method,
-            route=route,
-            status=response.status_code,
-        )
-        return response
-
-    @application.get("/health/live")
-    async def live() -> dict:
-        """存活探针只确认进程能接受请求。"""
-        return {"status": "alive"}
-
-    @application.get("/health/ready")
-    async def ready() -> Response:
-        """数据库迁移、非特权连接和 Redis 正常才就绪，否则返回 503。"""
-        result = await diagnostics(application.state.resources)
-        return JSONResponse(result, status_code=200 if result["ready"] else 503)
-
-    @application.get("/health/details")
-    async def details(request: Request) -> dict:
-        """详细诊断必须认证，避免公开依赖拓扑或配置来源。"""
-        principal = await current_principal(request)
-        principal.require("resources:read")
-        return await diagnostics(application.state.resources, detailed=True)
-
-    @application.get("/metrics")
-    async def metrics() -> Response:
-        """供受部署网络策略限制的 Prometheus 采集，标签不包含用户和线程。"""
-        import os
-
-        from sqlalchemy import func, select
-
-        from app.core.observability import active_runs, queue_depth
-        from app.db.models import Run
-
-        async with application.state.resources.db.transaction(system=True) as session:
-            queue_depth.set(
-                (
-                    await session.scalar(
-                        select(func.count()).select_from(Run).where(Run.status == "queued")
-                    )
-                )
-                or 0
-            )
-            active_runs.set(
-                (
-                    await session.scalar(
-                        select(func.count()).select_from(Run).where(Run.status == "running")
-                    )
-                )
-                or 0
-            )
-        if os.getenv("PROMETHEUS_MULTIPROC_DIR"):
-            registry = CollectorRegistry()
-            multiprocess.MultiProcessCollector(registry)
-            content = generate_latest(registry)
-        else:
-            content = generate_latest()
-        return Response(content, headers={"Content-Type": CONTENT_TYPE_LATEST})
+    install_request_context(application, logger)
+    application.include_router(health.router)
+    application.include_router(api_v1.router)
+    for module in modules:
+        if module.router:
+            application.include_router(module.router(), prefix="/api/v1")
 
     if settings.tracing.enabled:
         FastAPIInstrumentor.instrument_app(application, excluded_urls="health/.*,metrics")

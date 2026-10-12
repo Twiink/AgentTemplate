@@ -1,0 +1,3 @@
+# minimal 预设：只依赖 PostgreSQL 与 Redis 即可启动，附件存放在本地目录。
+modules:
+  - storage

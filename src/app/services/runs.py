@@ -1,4 +1,4 @@
-"""持久运行服务；事务投递、运行租约、线程互斥和事件序号全部以 PostgreSQL 为准。"""
+"""运行服务：运行租约、线程互斥、事件序号与执行；后台提交与投递由 background 模块负责。"""
 
 from __future__ import annotations
 
@@ -6,21 +6,34 @@ import asyncio
 import hashlib
 import json
 import time
+from collections.abc import Awaitable, Callable
 from datetime import timedelta
+from typing import Any
 from uuid import uuid4
 
+import structlog
 from opentelemetry import propagate
-from pydantic import ValidationError
 from sqlalchemy import delete, select
 
 from app.core.errors import AppError
-from app.core.observability import runs as run_metric
 from app.core.security import Principal
-from app.db.models import Memory, Outbox, Run, RunEvent, Thread, ToolCall, now
+from app.core.telemetry import runs as run_metric
+from app.db.models import Run, RunEvent, Thread, now
+from app.db.repository import attributes, owned, serialize
 from app.runtime.contracts import RunContext, current_run
-from app.services.data import attributes, owned, serialize
 
 TERMINAL = {"succeeded", "failed", "cancelled"}
+
+
+def classify(error: Exception, context: RunContext) -> dict[str, str]:
+    """把运行异常转为可公开的错误码；超时区分整体时间预算耗尽和单次调用超时。"""
+    if isinstance(error, AppError):
+        return {"code": error.code, "message": error.message}
+    if isinstance(error, TimeoutError):
+        if time.monotonic() >= context.deadline:
+            return {"code": "run_timeout", "message": "运行超过时间预算"}
+        return {"code": "upstream_timeout", "message": "模型或工具调用超时"}
+    return {"code": "execution_failed", "message": "运行执行失败"}
 
 
 class RunService:
@@ -28,48 +41,10 @@ class RunService:
 
     def __init__(self, resources):
         self.resources, self.db = resources, resources.db
+        # 运行成功后在同一事务内执行的回调，例如记忆模块据此安排提取任务。
+        self.succeeded_hooks: list[Callable[[Any, Run], Awaitable[Any]]] = []
 
-    async def submit(self, principal, agent_id, thread_id, input, options=None):
-        """校验注册 Schema 后锁住线程并创建排队运行和投递记录，返回 202 使用的资源。"""
-        registration = self.resources.agents.get(agent_id)
-        try:
-            input = registration.input_schema.model_validate(input).model_dump(mode="json")
-        except ValidationError as error:
-            raise AppError("agent_input_invalid", "输入不符合 Agent Schema", 422) from error
-        options = options or {}
-        if "configurable" in options or "thread_id" in options:
-            raise AppError("reserved_configuration", "运行配置不能覆盖服务端线程身份")
-        carrier = {}
-        propagate.inject(carrier)
-        async with self.db.transaction(principal) as session:
-            thread = (
-                await session.scalars(
-                    select(Thread)
-                    .where(Thread.id == thread_id, *owned(Thread, principal))
-                    .with_for_update()
-                )
-            ).one_or_none()
-            if thread is None:
-                raise AppError("resource_not_found", "线程不存在", 404)
-            if thread.active_run:
-                raise AppError("thread_busy", "同一线程已有活动运行", 409)
-            run = Run(
-                **attributes(principal),
-                agent_id=agent_id,
-                thread_id=thread_id,
-                input=input,
-                options=options,
-                scopes=sorted(principal.scopes),
-                trace_context=carrier,
-            )
-            session.add(run)
-            await session.flush()
-            thread.active_run = run.id
-            session.add(Outbox(**attributes(principal), task="run", resource_id=run.id))
-            await self._event(session, run, "status", {"status": "queued"})
-            return serialize(run)
-
-    async def _event(self, session, run, kind, payload):
+    async def append_event(self, session, run, kind, payload):
         """调用者必须已持有运行行锁；序号与事件同事务保存。"""
         run.event_sequence += 1
         session.add(
@@ -95,8 +70,7 @@ class RunService:
             ).one()
             if run.lease_token != context.lease_token or run.status != "running":
                 raise AppError("lease_lost", "执行租约已失效", 409)
-            await self._event(session, run, kind, payload)
-        await self.resources.redis.publish("run:" + context.run_id, kind)
+            await self.append_event(session, run, kind, payload)
 
     async def persist_usage(self, context):
         """每次模型调用后保存累计用量，恢复时不重置已消费预算。"""
@@ -132,12 +106,12 @@ class RunService:
                 run.status, run.completed_at = "cancelled", now()
                 thread = await session.get(Thread, run.thread_id)
                 thread.active_run = None
-                await self._event(session, run, "status", {"status": "cancelled"})
+                await self.append_event(session, run, "status", {"status": "cancelled"})
                 return None
             token = str(uuid4())
             run.status, run.lease_token = "running", token
             run.lease_until = now() + timedelta(seconds=self.resources.settings.lease_seconds)
-            await self._event(session, run, "status", {"status": "running"})
+            await self.append_event(session, run, "status", {"status": "running"})
             return run
 
     async def heartbeat(self, context, execution):
@@ -179,9 +153,10 @@ class RunService:
                 ).one()
                 if thread.active_run == run.id:
                     thread.active_run = None
-            await self._event(session, run, "status", {"status": status, "pending": pending})
+            await self.append_event(session, run, "status", {"status": status, "pending": pending})
             if status == "succeeded":
-                await self.resources.extraction.schedule(session, run)
+                for hook in self.succeeded_hooks:
+                    await hook(session, run)
 
     async def execute(self, run_id: str):
         """持有线程会话级 advisory lock，失效 Worker 尚存时不允许第二实例写检查点。"""
@@ -256,6 +231,8 @@ class RunService:
         async def invoke():
             """ContextVar 在执行任务自身设置，使工具和模型共享可信身份及预算。"""
             token = current_run.set(context)
+            # 运行任务内产生的日志都带上运行与 Agent 标识。
+            structlog.contextvars.bind_contextvars(run_id=run.id, agent_id=run.agent_id)
             try:
                 from langsmith.run_helpers import tracing_context
 
@@ -324,12 +301,13 @@ class RunService:
                 context.usage.get("elapsed_seconds", 0) + time.monotonic() - started
             )
             self.resources.logger.error(
-                "运行失败", run_id=run.id, exception_type=type(error).__name__
+                "运行失败",
+                run_id=run.id,
+                agent_id=run.agent_id,
+                exception_type=type(error).__name__,
+                exc_info=error,
             )
-            public = {
-                "code": error.code if isinstance(error, AppError) else "execution_failed",
-                "message": error.message if isinstance(error, AppError) else "运行执行失败",
-            }
+            public = classify(error, context)
             if isinstance(error, AppError) and error.code == "tool_outcome_unknown":
                 status = "waiting_input"
                 await self.finish(
@@ -361,54 +339,12 @@ class RunService:
                 run.status, run.completed_at = "cancelled", now()
                 thread = await session.get(Thread, run.thread_id)
                 thread.active_run = None
-                await self._event(session, run, "status", {"status": "cancelled"})
-            return serialize(run)
-
-    async def respond(self, principal, run_id, response, expected_sequence):
-        """只消费当前等待状态；事件序号避免重复响应或旧页面恢复新一轮等待。"""
-        async with self.db.transaction(principal) as session:
-            run = (
-                await session.scalars(
-                    select(Run).where(Run.id == run_id, *owned(Run, principal)).with_for_update()
-                )
-            ).one_or_none()
-            if run is None:
-                raise AppError("resource_not_found", "运行不存在", 404)
-            if run.status != "waiting_input" or run.event_sequence != expected_sequence:
-                raise AppError("resume_conflict", "运行已恢复或响应版本过期", 409)
-            if run.cancel_requested:
-                raise AppError("run_cancelled", "运行已取消", 409)
-            if run.pending and run.pending.get("type") == "tool_reconciliation":
-                reconciliation = response.get("reconcile", {})
-                call = (
-                    await session.scalars(
-                        select(ToolCall)
-                        .where(
-                            ToolCall.run_id == run.id,
-                            ToolCall.call_id == reconciliation.get("call_id"),
-                            ToolCall.status.in_(["unknown", "executing"]),
-                        )
-                        .with_for_update()
-                    )
-                ).one_or_none()
-                if call is None:
-                    raise AppError(
-                        "reconciliation_required", "需要指定未知副作用调用并提供核对结果", 422
-                    )
-                if "result" in reconciliation:
-                    call.status, call.result = "succeeded", reconciliation["result"]
-                elif reconciliation.get("confirmed_not_executed") is True:
-                    await session.delete(call)
-                else:
-                    raise AppError("reconciliation_required", "必须提供真实结果或确认未执行", 422)
-            run.resume, run.status, run.pending = response, "queued", None
-            session.add(Outbox(**attributes(principal), task="run", resource_id=run.id))
-            await self._event(session, run, "status", {"status": "queued"})
+                await self.append_event(session, run, "status", {"status": "cancelled"})
             return serialize(run)
 
     async def events(self, principal, run_id, after=0):
         """读取完整持久事件分页；不存在和无权限都拒绝，Redis 通知不作为事件来源。"""
-        await self.resources.data.get(Run, run_id, principal)
+        await self.resources.repository.get(Run, run_id, principal)
         async with self.db.transaction(principal) as session:
             rows = (
                 await session.scalars(
@@ -426,79 +362,8 @@ class RunService:
                 {"sequence": row.sequence, "kind": row.kind, "payload": row.payload} for row in rows
             ]
 
-    async def dispatch(self):
-        """发布待投递记录并确认；发布后崩溃会再次投递，run claim 处理重复。"""
-        from sqlalchemy import func
-
-        from app.core.observability import active_runs, queue_depth
-        from app.worker.celery import celery_app
-
-        async with self.db.transaction(system=True) as session:
-            queue_depth.set(
-                (
-                    await session.scalar(
-                        select(func.count()).select_from(Run).where(Run.status == "queued")
-                    )
-                )
-                or 0
-            )
-            active_runs.set(
-                (
-                    await session.scalar(
-                        select(func.count()).select_from(Run).where(Run.status == "running")
-                    )
-                )
-                or 0
-            )
-
-        async with self.db.transaction(system=True) as session:
-            rows = (
-                await session.scalars(
-                    select(Outbox)
-                    .where(Outbox.delivered_at.is_(None))
-                    .order_by(Outbox.created_at)
-                    .limit(100)
-                    .with_for_update(skip_locked=True)
-                )
-            ).all()
-            for row in rows:
-                task = {
-                    "run": "agent.run",
-                    "knowledge": "agent.knowledge",
-                    "memory": "agent.memory",
-                }[row.task]
-                await asyncio.to_thread(celery_app.send_task, task, args=[row.resource_id])
-                row.delivered_at = now()
-        return len(rows)
-
-    async def recover(self):
-        """回收失效租约并重新投递；正在执行步骤采用至少一次语义，副作用由账本防护。"""
-        async with self.db.transaction(system=True) as session:
-            rows = (
-                await session.scalars(
-                    select(Run)
-                    .where(Run.status == "running", Run.lease_until < now())
-                    .with_for_update(skip_locked=True)
-                )
-            ).all()
-            for run in rows:
-                run.status, run.lease_token, run.lease_until = "queued", None, None
-                session.add(
-                    Outbox(
-                        tenant_id=run.tenant_id,
-                        subject_id=run.subject_id,
-                        task="run",
-                        resource_id=run.id,
-                    )
-                )
-                await self._event(
-                    session, run, "status", {"status": "queued", "reason": "lease_expired"}
-                )
-        await self.resources.knowledge.recover()
-        return len(rows)
-
     async def cleanup(self):
-        """只清理配置保留期后的终态运行和过期记忆；知识与未过期记忆不自动删除。"""
+        """删除配置保留期之前结束的终态运行，事件随运行级联删除。"""
         async with self.db.transaction(system=True) as session:
             await session.execute(
                 delete(Run).where(
@@ -506,8 +371,4 @@ class RunService:
                     Run.completed_at
                     < now() - timedelta(days=self.resources.settings.run_retention_days),
                 )
-            )
-            await session.execute(delete(Memory).where(Memory.expires_at < now()))
-            await session.execute(
-                delete(Outbox).where(Outbox.delivered_at < now() - timedelta(days=7))
             )

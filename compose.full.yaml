@@ -1,0 +1,58 @@
+# full 预设追加的服务：Worker、调度进程与可选的 MinIO。
+# 启动：docker compose -f compose.yaml -f compose.full.yaml --env-file .data/compose.env up -d
+services:
+  worker:
+    image: agent-template:local
+    user: ${UID:-1000}:${GID:-1000}
+    command:
+    - agent-template
+    - worker
+    environment:
+      AGENT_DATABASE_URL: postgresql+asyncpg://agent_app:${AGENT_DB_PASSWORD}@postgres:5432/agenttemplate
+      AGENT_MIGRATION_DATABASE_URL: postgresql+asyncpg://agent_owner:${AGENT_DB_PASSWORD}@postgres:5432/agenttemplate
+      AGENT_REDIS_URL: redis://redis:6379/0
+      PROMETHEUS_MULTIPROC_DIR: /opt/app/.data/worker-metrics
+    volumes:
+    - ./config/private.yaml:/opt/app/config/private.yaml:ro
+    - ./prompts:/opt/app/prompts:ro
+    - ./.data:/opt/app/.data
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    stop_grace_period: 360s
+  scheduler:
+    image: agent-template:local
+    user: ${UID:-1000}:${GID:-1000}
+    command:
+    - agent-template
+    - scheduler
+    environment:
+      AGENT_DATABASE_URL: postgresql+asyncpg://agent_app:${AGENT_DB_PASSWORD}@postgres:5432/agenttemplate
+      AGENT_MIGRATION_DATABASE_URL: postgresql+asyncpg://agent_owner:${AGENT_DB_PASSWORD}@postgres:5432/agenttemplate
+      AGENT_REDIS_URL: redis://redis:6379/0
+    volumes:
+    - ./config/private.yaml:/opt/app/config/private.yaml:ro
+    - ./.data:/opt/app/.data
+    - ./prompts:/opt/app/prompts:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    profiles:
+    - storage
+    command:
+    - server
+    - /data
+    - --console-address
+    - :9001
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-}
+    ports:
+    - 127.0.0.1:9000:9000
+    - 127.0.0.1:9001:9001
+    volumes:
+    - minio-data:/data
+volumes:
+  minio-data: null

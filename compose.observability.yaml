@@ -1,0 +1,210 @@
+# 可选观测栈：Prometheus、Grafana、Collector 与自托管 Langfuse，按 profile 选择启动。
+# 示例：docker compose -f compose.yaml -f compose.full.yaml -f compose.observability.yaml \
+#   --env-file .data/compose.env --env-file .data/observability.env --profile metrics up -d
+services:
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    profiles:
+    - metrics
+    volumes:
+    - ./deploy/observability/prometheus.yaml:/etc/prometheus/prometheus.yml:ro
+    - ./deploy/observability/alerts.yaml:/etc/prometheus/alerts.yaml:ro
+    ports:
+    - 127.0.0.1:9090:9090
+  grafana:
+    image: grafana/grafana:12.1.1
+    profiles:
+    - metrics
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-}
+    volumes:
+    - ./deploy/observability/grafana:/etc/grafana/provisioning:ro
+    ports:
+    - 127.0.0.1:3000:3000
+  collector:
+    image: otel/opentelemetry-collector-contrib:0.139.0
+    profiles:
+    - tracing
+    command:
+    - --config=/etc/otel/config.yaml
+    environment:
+      LANGFUSE_OTLP_ENDPOINT: ${LANGFUSE_OTLP_ENDPOINT:-http://langfuse-web:3000/api/public/otel/v1/traces}
+      LANGFUSE_AUTH: ${LANGFUSE_AUTH:-}
+      LANGSMITH_OTLP_ENDPOINT: ${LANGSMITH_OTLP_ENDPOINT:-https://api.smith.langchain.com/otel/v1/traces}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-agent-template}
+    volumes:
+    - ./.data/collector.yaml:/etc/otel/config.yaml:ro
+    ports:
+    - 127.0.0.1:4318:4318
+  langfuse-postgres:
+    image: postgres:18.6-bookworm
+    profiles:
+    - langfuse
+    environment:
+      POSTGRES_USER: langfuse
+      POSTGRES_DB: langfuse
+      POSTGRES_PASSWORD: ${LANGFUSE_DB_PASSWORD:-}
+    volumes:
+    - langfuse-postgres-data:/var/lib/postgresql
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - pg_isready -U langfuse -d langfuse
+      interval: 5s
+      retries: 20
+  langfuse-clickhouse:
+    image: clickhouse/clickhouse-server:25.12.3.21
+    profiles:
+    - langfuse
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: langfuse
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:-}
+    volumes:
+    - langfuse-clickhouse-data:/var/lib/clickhouse
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - wget -q --spider http://localhost:8123/ping
+      interval: 5s
+      retries: 30
+  langfuse-minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    profiles:
+    - langfuse
+    entrypoint:
+    - sh
+    - -c
+    - mkdir -p /data/langfuse && minio server /data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: ${LANGFUSE_S3_USER:-}
+      MINIO_ROOT_PASSWORD: ${LANGFUSE_S3_PASSWORD:-}
+    ports:
+    - 127.0.0.1:9091:9000
+    volumes:
+    - langfuse-minio-data:/data
+    healthcheck:
+      test:
+      - CMD
+      - mc
+      - ready
+      - local
+      interval: 5s
+      retries: 30
+  langfuse-redis:
+    image: redis:8.2.1-alpine
+    profiles:
+    - langfuse
+    command:
+    - redis-server
+    - --requirepass
+    - ${LANGFUSE_REDIS_PASSWORD:-}
+    - --maxmemory-policy
+    - noeviction
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - redis-cli -a "$${REDIS_PASSWORD}" ping
+      interval: 5s
+      retries: 20
+    environment:
+      REDIS_PASSWORD: ${LANGFUSE_REDIS_PASSWORD:-}
+    volumes:
+    - langfuse-redis-data:/data
+  langfuse-worker:
+    image: docker.langfuse.com/langfuse/langfuse-worker:4.56.0
+    profiles:
+    - langfuse
+    environment:
+      NEXTAUTH_URL: http://localhost:3001
+      DATABASE_URL: postgresql://langfuse:${LANGFUSE_DB_PASSWORD:-}@langfuse-postgres:5432/langfuse
+      SALT: ${LANGFUSE_SALT:-}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-}
+      TELEMETRY_ENABLED: 'false'
+      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
+      CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+      CLICKHOUSE_USER: langfuse
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:-}
+      CLICKHOUSE_CLUSTER_ENABLED: 'false'
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: us-east-1
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${LANGFUSE_S3_USER:-}
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_S3_PASSWORD:-}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: 'true'
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: us-east-1
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${LANGFUSE_S3_USER:-}
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_S3_PASSWORD:-}
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://localhost:9091
+      LANGFUSE_S3_MEDIA_UPLOAD_INTERNAL_ENDPOINT: http://langfuse-minio:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: 'true'
+      REDIS_HOST: langfuse-redis
+      REDIS_PORT: '6379'
+      REDIS_AUTH: ${LANGFUSE_REDIS_PASSWORD:-}
+      REDIS_TLS_ENABLED: 'false'
+    depends_on:
+      langfuse-postgres:
+        condition: service_healthy
+      langfuse-clickhouse:
+        condition: service_healthy
+      langfuse-minio:
+        condition: service_healthy
+      langfuse-redis:
+        condition: service_healthy
+  langfuse-web:
+    image: docker.langfuse.com/langfuse/langfuse:4.56.0
+    profiles:
+    - langfuse
+    environment:
+      NEXTAUTH_URL: http://localhost:3001
+      DATABASE_URL: postgresql://langfuse:${LANGFUSE_DB_PASSWORD:-}@langfuse-postgres:5432/langfuse
+      SALT: ${LANGFUSE_SALT:-}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-}
+      TELEMETRY_ENABLED: 'false'
+      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
+      CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+      CLICKHOUSE_USER: langfuse
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:-}
+      CLICKHOUSE_CLUSTER_ENABLED: 'false'
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: us-east-1
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${LANGFUSE_S3_USER:-}
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_S3_PASSWORD:-}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: 'true'
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: us-east-1
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${LANGFUSE_S3_USER:-}
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_S3_PASSWORD:-}
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://localhost:9091
+      LANGFUSE_S3_MEDIA_UPLOAD_INTERNAL_ENDPOINT: http://langfuse-minio:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: 'true'
+      REDIS_HOST: langfuse-redis
+      REDIS_PORT: '6379'
+      REDIS_AUTH: ${LANGFUSE_REDIS_PASSWORD:-}
+      REDIS_TLS_ENABLED: 'false'
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-}
+      LANGFUSE_INIT_ORG_ID: agent-template
+      LANGFUSE_INIT_ORG_NAME: AgentTemplate
+      LANGFUSE_INIT_PROJECT_ID: agent-template
+      LANGFUSE_INIT_PROJECT_NAME: AgentTemplate
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+    depends_on:
+      langfuse-postgres:
+        condition: service_healthy
+      langfuse-clickhouse:
+        condition: service_healthy
+      langfuse-minio:
+        condition: service_healthy
+      langfuse-redis:
+        condition: service_healthy
+    ports:
+    - 127.0.0.1:3001:3000
+volumes:
+  langfuse-postgres-data: {}
+  langfuse-clickhouse-data: {}
+  langfuse-minio-data: {}
+  langfuse-redis-data: {}
