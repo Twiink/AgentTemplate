@@ -66,4 +66,4 @@ docker compose -f compose.yaml -f compose.full.yaml -f compose.observability.yam
 
 `agent-template evaluate` 接受 JSONL 数据集、评分器 `模块:函数`、输出文件、可选 baseline 和 threshold。每行数据包含 id、agent_id、input、expected 和 options。评分器接收真实运行记录并返回指标名到有限数值的字典。环境身份用 `AGENT_EVALUATION_TOKEN` 或私有开发 Key 验证。结果记录真实用量缺失、运行失败和评分失败，不预设业务正确率。
 
-`memory_extraction_registration` 默认为空。项目注册真实提取 Agent 后，源运行成功会排队提取；输入包含 source_run_id、input、output，输出必须符合 `ExtractionOutput`。模板筛选常见秘密内容、按 namespace／key 去重合并、保留来源，最多三次失败重试。提取 Agent 自身不会递归触发提取。
+`agents.extraction` 默认为空。设置为本项目提取 Agent 的 ID 后，源运行成功会排队提取；输入包含 source_run_id、input、output，输出必须符合 `ExtractionOutput`。模板筛选常见秘密内容、按 namespace／key 去重合并、保留来源，最多三次失败重试。提取 Agent 自身不会递归触发提取。

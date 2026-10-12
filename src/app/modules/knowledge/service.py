@@ -607,28 +607,3 @@ class KnowledgeService:
                 ]
 
         return Retriever()
-
-    def llama_retriever(self, principal, knowledge_id: str, top_k=5):
-        """构造 LlamaIndex 原生 BaseRetriever，返回带定位的 TextNode。"""
-        from llama_index.core.retrievers import BaseRetriever
-        from llama_index.core.schema import NodeWithScore, TextNode
-
-        service = self
-
-        class Retriever(BaseRetriever):
-            """异步原生检索器，复用同一活动索引和访问控制。"""
-
-            def _retrieve(self, query_bundle):
-                raise AppError("async_required", "检索必须使用异步接口")
-
-            async def _aretrieve(self, query_bundle):
-                rows = await service.search(principal, knowledge_id, query_bundle.query_str, top_k)
-                return [
-                    NodeWithScore(
-                        node=TextNode(text=row["content"], metadata=row["metadata"]),
-                        score=1 - row["distance"],
-                    )
-                    for row in rows
-                ]
-
-        return Retriever()

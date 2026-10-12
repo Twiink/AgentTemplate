@@ -112,7 +112,6 @@ async def evaluate_dataset(
         for case in cases:
             started = time.monotonic()
             thread = await resources.threads.create(principal)
-            registration = resources.agents.get(case.agent_id)
             submitted = await background.submit(
                 principal, case.agent_id, thread["id"], case.input, case.options
             )
@@ -131,7 +130,6 @@ async def evaluate_dataset(
             record: dict[str, Any] = {
                 "id": case.id,
                 "agent_id": case.agent_id,
-                "framework": registration.framework,
                 "run_id": run["id"],
                 "status": run["status"],
                 "input": case.input,

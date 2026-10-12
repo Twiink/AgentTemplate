@@ -42,7 +42,7 @@ class ExtractionService:
         """源运行成功后同事务建立任务；提取 Agent 自身不递归提取。"""
         from app.modules.background.models import Outbox
 
-        registration = self.resources.settings.memory_extraction_registration
+        registration = self.resources.settings.agents.extraction
         if not registration or registration == run.agent_id:
             return
         job = MemoryExtraction(

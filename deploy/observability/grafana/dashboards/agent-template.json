@@ -47,7 +47,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(agent_runs_total[5m])) by (framework,status)"
+          "expr": "sum(rate(agent_runs_total[5m])) by (agent,status)"
         }
       ]
     },

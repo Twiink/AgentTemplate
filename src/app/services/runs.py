@@ -216,17 +216,15 @@ class RunService:
             context.approvals = run.resume["approvals"]
         started = time.monotonic()
         try:
-            registration = self.resources.agents.get(run.agent_id)
+            item = self.resources.agents.get(run.agent_id)
         except AppError as error:
             await self.finish(
                 context, "failed", error={"code": error.code, "message": error.message}
             )
             return
-        from app.runtime.adapters import LangGraphAdapter, LlamaIndexAdapter, WaitingInput
+        from app.runtime.adapters import LangGraphAdapter, WaitingInput
 
-        adapter = (
-            LlamaIndexAdapter() if registration.framework == "llamaindex" else LangGraphAdapter()
-        )
+        adapter = LangGraphAdapter()
 
         async def invoke():
             """ContextVar 在执行任务自身设置，使工具和模型共享可信身份及预算。"""
@@ -242,8 +240,7 @@ class RunService:
                         "Agent 运行",
                         context=propagate.extract(run.trace_context),
                         attributes={
-                            "agent.framework": registration.framework,
-                            "agent.id": registration.id,
+                            "agent.id": item.spec.id,
                             "agent.run_id": run.id,
                         },
                     ),
@@ -261,7 +258,7 @@ class RunService:
                             }
                     async with asyncio.timeout(max(0.01, context.deadline - time.monotonic())):
                         return await adapter.execute(
-                            registration, context, run.input, run.options, run.snapshot, run.resume
+                            item, context, run.input, run.options, run.snapshot, run.resume
                         )
             finally:
                 current_run.reset(token)
@@ -274,17 +271,14 @@ class RunService:
             context.usage["elapsed_seconds"] = (
                 context.usage.get("elapsed_seconds", 0) + time.monotonic() - started
             )
-            if registration.output_schema:
-                output = registration.output_schema.model_validate(output).model_dump(mode="json")
-            else:
-                output = json.loads(
-                    json.dumps(
-                        output,
-                        default=lambda x: (
-                            x.model_dump(mode="json") if hasattr(x, "model_dump") else str(x)
-                        ),
-                    )
+            output = json.loads(
+                json.dumps(
+                    output,
+                    default=lambda x: (
+                        x.model_dump(mode="json") if hasattr(x, "model_dump") else str(x)
+                    ),
                 )
+            )
             status = "succeeded"
             await self.finish(context, status, output=output)
         except WaitingInput as waiting:
@@ -320,7 +314,7 @@ class RunService:
         finally:
             heartbeat.cancel()
             await asyncio.gather(heartbeat, return_exceptions=True)
-            run_metric.labels(registration.framework, status).inc()
+            run_metric.labels(run.agent_id, status).inc()
 
     async def cancel(self, principal, run_id):
         """取消请求持久化；排队或等待输入直接终止，执行中由心跳协作停止。"""

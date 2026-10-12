@@ -8,10 +8,8 @@ from pydantic import BaseModel
 
 
 class AgentOut(BaseModel):
-    """显式注册的 Agent；输入输出结构为注册时声明的 JSON Schema。"""
+    """自动发现的 Agent；输入结构为声明时给出的 JSON Schema，缺省表示 messages 输入。"""
 
     id: str
-    framework: str
-    input_schema: dict[str, Any]
-    output_schema: dict[str, Any] | None = None
-    capabilities: list[str]
+    description: str
+    input_schema: dict[str, Any] | None = None

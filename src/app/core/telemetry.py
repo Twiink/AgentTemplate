@@ -25,7 +25,7 @@ _provider_lock = threading.Lock()
 
 requests = Counter("agent_http_requests_total", "接口请求次数", ["method", "route", "status"])
 latency = Histogram("agent_http_duration_seconds", "接口处理耗时", ["method", "route"])
-runs = Counter("agent_runs_total", "运行状态统计", ["framework", "status"])
+runs = Counter("agent_runs_total", "运行状态统计", ["agent", "status"])
 tools = Counter("agent_tool_calls_total", "工具调用统计", ["tool", "status"])
 models = Counter("agent_model_calls_total", "模型调用统计", ["provider", "status"])
 queue_depth = Gauge("agent_queue_depth", "持久排队运行数量", multiprocess_mode="livemax")

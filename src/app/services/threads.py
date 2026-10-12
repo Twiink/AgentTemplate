@@ -7,8 +7,19 @@ import hashlib
 from sqlalchemy import select
 
 from app.core.errors import AppError
+from app.core.security import Principal
 from app.db.models import Thread
 from app.db.repository import attributes, owned, serialize
+
+
+def checkpoint_namespace(principal: Principal, thread_id: str) -> str:
+    """把租户、主体与线程编码为检查点命名空间。
+
+    这是权限边界：客户端与模型都不能指定该值，因此统一在这里生成，避免多处实现漂移。
+    """
+    return hashlib.sha256(
+        f"{principal.tenant_id}\0{principal.subject_id}\0{thread_id}".encode()
+    ).hexdigest()
 
 
 class ThreadService:
@@ -41,9 +52,7 @@ class ThreadService:
             if row.active_run:
                 raise AppError("thread_busy", "线程有未结束运行", 409)
             # 先保持行锁阻止新运行，再删除原生状态；删除失败不移除归属记录。
-            namespace = hashlib.sha256(
-                f"{principal.tenant_id}\0{principal.subject_id}\0{thread_id}".encode()
-            ).hexdigest()
+            namespace = checkpoint_namespace(principal, thread_id)
             saver = await self.resources.checkpoint()
             await saver.adelete_thread(namespace)
             await session.delete(row)
@@ -63,20 +72,13 @@ class ThreadService:
                 )
             ).first()
             if run is None:
-                return {"framework": None, "state": None}
-            registration = self.resources.agents.get(run.agent_id)
-            if registration.framework == "llamaindex":
-                return {
-                    "framework": "llamaindex",
-                    "context": run.snapshot.get("context") if run.snapshot else None,
-                }
-        namespace = hashlib.sha256(
-            f"{principal.tenant_id}\0{principal.subject_id}\0{thread_id}".encode()
-        ).hexdigest()
+                return {"agent": None, "state": None}
+            agent_id = run.agent_id
+        namespace = checkpoint_namespace(principal, thread_id)
         saver = await self.resources.checkpoint()
         checkpoint = await saver.aget_tuple({"configurable": {"thread_id": namespace}})
         if checkpoint is None:
-            return {"framework": registration.framework, "state": None}
+            return {"agent": agent_id, "state": None}
 
         def convert(value):
             """原生消息使用 JSON 模型序列化，未知类型给出准确序列化错误。"""
@@ -87,7 +89,7 @@ class ThreadService:
         import json
 
         return {
-            "framework": registration.framework,
+            "agent": agent_id,
             "state": json.loads(
                 json.dumps(checkpoint.checkpoint["channel_values"], default=convert)
             ),

@@ -172,6 +172,14 @@ class TraceConfig(StrictModel):
     langsmith_project: str | None = None
 
 
+class AgentConfig(StrictModel):
+    """Agent 发现配置；enabled 为空表示启用全部自动发现的 Agent。"""
+
+    enabled: list[str] = Field(default_factory=list)
+    # 记忆提取使用的 Agent ID；留空表示不启用后台提取。
+    extraction: str | None = None
+
+
 class PreflightConfig(StrictModel):
     """启动预检；API 与 Worker 启动前执行，阻断项失败时停止启动。"""
 
@@ -210,7 +218,8 @@ class Settings(BaseSettings):
     tools: ToolConfig = Field(default_factory=ToolConfig)
     mcp: dict[str, MCPServer] = Field(default_factory=dict)
     tracing: TraceConfig = Field(default_factory=TraceConfig)
-    registrations: list[str] = Field(default_factory=list)
+    # Agent 改为自动发现：扫描 app.agents.*.agent 中的 spec，用过 agents.enabled 限定。
+    agents: AgentConfig = Field(default_factory=AgentConfig)
     prompts_directory: Path = Path("prompts")
     run_timeout_seconds: int = Field(default=300, ge=1)
     run_token_budget: int = Field(default=64000, ge=1)
@@ -219,7 +228,6 @@ class Settings(BaseSettings):
     lease_seconds: int = Field(default=60, ge=15)
     run_retention_days: int = Field(default=30, ge=1)
     memory_retention_days: int | None = Field(default=None, ge=1)
-    memory_extraction_registration: str | None = None
     rate_limit_per_minute: int = Field(default=60, ge=1)
     # open 在限流后端故障时放行并告警，closed 返回 503；由部署方在可用性与防护之间选择。
     rate_limit_failure_mode: Literal["open", "closed"] = "open"

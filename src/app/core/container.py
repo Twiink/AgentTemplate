@@ -6,14 +6,13 @@
 from __future__ import annotations
 
 import asyncio
-import importlib
-import inspect
 from contextlib import AsyncExitStack
 from typing import TYPE_CHECKING, Any
 
 import httpx
 from redis.asyncio import Redis
 
+from app.agents.registry import AgentRegistry
 from app.core.config import Settings
 from app.core.logging import setup_logging
 from app.core.telemetry import Telemetry
@@ -22,7 +21,6 @@ from app.db.session import Database
 from app.llm.gateway import ModelGateway
 from app.modules import Module, load, resolve
 from app.prompts.loader import PromptLoader
-from app.runtime.contracts import AgentRegistry
 
 if TYPE_CHECKING:
     from app.modules.background.service import BackgroundService
@@ -60,7 +58,8 @@ class Container:
         self.stack = AsyncExitStack()
         self.logger = setup_logging(settings)
         self.telemetry = Telemetry(settings)
-        self.agents = AgentRegistry()
+        # 空注册表；启动时由 build_agents 按配置发现并构建。
+        self.agents = AgentRegistry(enabled=list(settings.agents.enabled))
         self.modules: list[Module] = []
         self.checkpointer: Any = None
         self._checkpoint_lock: asyncio.Lock | None = None
@@ -121,13 +120,32 @@ class Container:
             if module.setup:
                 await module.setup(self)
             self.modules.append(module)
-        for reference in self.settings.registrations:
-            module_name, symbol = reference.split(":", 1)
-            register = getattr(importlib.import_module(module_name), symbol)
-            result = register(self)
-            if inspect.isawaitable(result):
-                await result
+        # Agent 在模块装配完成后统一构建；任何一个构建失败都会停止启动。
+        await self.build_agents()
         return self
+
+    async def build_agents(self):
+        """发现并构建启用的 Agent；构建只做装配，运行期身份由服务端注入。
+
+        没有任何启用的 Agent 时不建立 Checkpointer 连接，保持 minimal 档只依赖
+        PostgreSQL 可用即可启动；有 Agent 时才解析共享的 Checkpointer。
+        """
+        from app.agents.registry import AgentRegistry, BuildContext
+
+        self.agents = AgentRegistry(enabled=list(self.settings.agents.enabled))
+        if not self.agents.discover():
+            self.agents.items = {}
+            return
+        context = BuildContext(
+            settings=self.settings,
+            models=self.models,
+            tools=self.tools,
+            prompts=self.prompts,
+            checkpointer=await self.checkpoint(),
+            store=None,
+            middleware=None,
+        )
+        await self.agents.build_all(context)
 
     async def __aenter__(self):
         """初始化失败也释放部分成功的资源；调用者不必额外处理退出流程。"""

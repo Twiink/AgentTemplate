@@ -1,33 +1,33 @@
-"""三框架原生运行适配器；LangChain 复用 LangGraph，LlamaIndex 保存步骤边界 JSON Context。"""
+"""LangGraph 运行适配器：执行启动时已构建的图，保存步骤边界并识别人工中断。
+
+图在启动时由 AgentRegistry 构建一次，这里不再重复装配；运行期只负责身份注入、
+事件转发与中断识别。LlamaIndex 适配在阶段 3.2 随框架收敛一并删除。
+"""
 
 from __future__ import annotations
-
-import inspect
 
 from app.core.errors import AppError
 
 
 class WaitingInput(Exception):
-    """已经保存快照的等待状态；Worker 捕获后释放任务资源。"""
+    """已经保存快照的等待状态；执行方捕获后释放任务资源。"""
 
     def __init__(self, pending):
         self.pending = pending
 
 
 class LangGraphAdapter:
-    """适配原生 CompiledGraph 和 create_agent 返回对象，不构建默认业务图。"""
+    """执行原生 CompiledGraph 和 create_agent 返回对象，不构建默认业务图。"""
 
-    async def execute(self, registration, context, input, options, snapshot, resume):
+    async def execute(self, item, context, input, options, snapshot, resume):
         """保留原生输入及命名空间配置，服务端覆盖线程标识，输出保留最终原生状态。"""
         from langgraph.types import Command
 
+        graph = item.graph
         checkpointer = await context.resources.checkpoint()
-        graph = registration.factory(context, checkpointer)
-        if inspect.isawaitable(graph):
-            graph = await graph
         if getattr(graph, "checkpointer", None) is not checkpointer:
-            raise AppError("checkpointer_required", "项目工厂必须使用模板提供的 Checkpointer")
-        native = dict(options.get(registration.framework, {}))
+            raise AppError("checkpointer_required", "项目构建必须使用模板提供的 Checkpointer")
+        native = dict(options.get("langgraph", {}))
         configurable = dict(native.get("configurable", {}))
         for key in {"thread_id", "checkpoint_ns", "checkpoint_id"}:
             if key in configurable:
@@ -60,7 +60,6 @@ class LangGraphAdapter:
         await context.resources.runs.snapshot(
             context,
             {
-                "framework": registration.framework,
                 "started": True,
                 "base_checkpoint_id": snapshot.get("base_checkpoint_id")
                 if snapshot
@@ -111,101 +110,15 @@ class LangGraphAdapter:
         state = await graph.aget_state(config)
         interrupts = [interrupt for task in state.tasks for interrupt in task.interrupts]
         if interrupts:
-            raise WaitingInput(
-                {
-                    "framework": registration.framework,
-                    "interrupts": [{"id": i.id, "value": i.value} for i in interrupts],
-                }
-            )
+            raise WaitingInput({"interrupts": [{"id": i.id, "value": i.value} for i in interrupts]})
         if state.next:
             await context.resources.runs.snapshot(
                 context,
                 {
-                    "framework": registration.framework,
                     "started": True,
                     "static_interrupt": True,
                     "base_checkpoint_id": checkpoint_id,
                 },
             )
-            raise WaitingInput({"framework": registration.framework, "next": list(state.next)})
+            raise WaitingInput({"next": list(state.next)})
         return state.values if final is None else final
-
-
-class LlamaIndexAdapter:
-    """遵循官方步骤状态事件保存 Context；序列化 JSON，禁止 pickle 运行期资源。"""
-
-    async def execute(self, registration, context, input, options, snapshot, resume):
-        """恢复 Context 后发送原生 HumanResponseEvent，等待输入时保存并取消 handler。"""
-        from workflows import Context
-        from workflows.events import (
-            HumanResponseEvent,
-            InputRequiredEvent,
-            StepState,
-            StepStateChanged,
-        )
-
-        if snapshot and snapshot.get("finished"):
-            return snapshot["result"]
-        workflow = registration.factory(context, None)
-        if inspect.isawaitable(workflow):
-            workflow = await workflow
-        native = dict(options.get("llamaindex", {}))
-        if any(key in native for key in {"ctx", "start_event"}):
-            raise AppError("reserved_configuration", "原生配置不能替换持久上下文")
-        ctx = (
-            Context.from_dict(workflow, snapshot["context"])
-            if snapshot and "context" in snapshot
-            else Context(workflow)
-        )
-        context.llama_context = ctx
-        handler = workflow.run(ctx=ctx, **({} if snapshot else input), **native)
-        try:
-            if resume:
-                handler.ctx.send_event(HumanResponseEvent(**resume.get("value", resume)))
-            async for event in handler.stream_events(expose_internal=True):
-                if isinstance(event, StepStateChanged):
-                    if event.step_state == StepState.NOT_RUNNING:
-                        await context.resources.runs.snapshot(
-                            context, {"framework": "llamaindex", "context": ctx.to_dict()}
-                        )
-                    await context.resources.runs.emit(
-                        context, "node", {"node": event.name, "state": event.step_state.value}
-                    )
-                elif isinstance(event, InputRequiredEvent):
-                    await context.resources.runs.snapshot(
-                        context, {"framework": "llamaindex", "context": ctx.to_dict()}
-                    )
-                    pending = {"framework": "llamaindex", "event": event.model_dump(mode="json")}
-                    await handler.cancel_run()
-                    raise WaitingInput(pending)
-                else:
-                    data = event.model_dump(mode="json")
-                    if "delta" in data:
-                        await context.resources.runs.emit(
-                            context, "text_delta", {"content": data["delta"]}
-                        )
-                    elif event.__class__.__name__ in {"ToolCall", "ToolCallResult"}:
-                        await context.resources.runs.emit(
-                            context,
-                            "tool",
-                            {"type": event.__class__.__name__, "tool_name": data.get("tool_name")},
-                        )
-                    else:
-                        await context.resources.runs.emit(
-                            context, "custom", {"type": event.__class__.__name__, "data": data}
-                        )
-            result = await handler
-            await context.resources.runs.snapshot(
-                context,
-                {
-                    "framework": "llamaindex",
-                    "context": ctx.to_dict(),
-                    "finished": True,
-                    "result": result.model_dump(mode="json")
-                    if hasattr(result, "model_dump")
-                    else result,
-                },
-            )
-            return result
-        finally:
-            await handler.cancel_run()

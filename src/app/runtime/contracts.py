@@ -1,14 +1,14 @@
-"""框架共享的注册及运行契约；保留原生对象，不强制把各框架状态变成同一种消息。"""
+"""运行上下文：单次租约内的可信身份与预算累积，工具与模型共享同一份。
+
+Agent 的注册契约见 app.agents.registry；本模块只保留运行期状态。
+"""
 
 from __future__ import annotations
 
 import contextvars
 import time
-from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol
-
-from pydantic import BaseModel
+from typing import Any
 
 from app.core.errors import AppError
 from app.core.security import Principal
@@ -99,68 +99,7 @@ class RunContext:
             raise AppError("token_budget", "运行已超过 Token 预算")
 
 
+# 运行期可信上下文的传递通道；阶段 3.4 改为通过 LangChain 的 context_schema 显式传入。
 current_run: contextvars.ContextVar[RunContext | None] = contextvars.ContextVar(
     "current_run", default=None
 )
-
-
-@dataclass(frozen=True)
-class AgentRegistration:
-    """项目声明的原生实现；factory 接收 RunContext 和 Checkpointer，输入输出由 Schema 校验。"""
-
-    id: str
-    framework: Literal["langchain", "langgraph", "llamaindex"]
-    factory: Callable[..., Any]
-    input_schema: type[BaseModel]
-    output_schema: type[BaseModel] | None = None
-    capabilities: frozenset[str] = frozenset({"streaming", "resume", "cancel"})
-
-
-class RuntimeAdapter(Protocol):
-    """运行适配器只负责事件、快照与恢复，具体状态仍由原生实现定义。"""
-
-    async def execute(
-        self,
-        registration: AgentRegistration,
-        context: RunContext,
-        input: dict[str, Any],
-        options: dict[str, Any],
-        snapshot: dict[str, Any] | None,
-        resume: dict[str, Any] | None,
-    ) -> Any:
-        """执行或恢复原生实现，等待输入通过持久化状态表达。"""
-        ...
-
-
-class AgentRegistry:
-    """空的显式注册表；禁止重复名称，公共 API 返回 Schema 与能力。"""
-
-    def __init__(self):
-        self._items: dict[str, AgentRegistration] = {}
-
-    def register(self, registration: AgentRegistration) -> None:
-        """接入项目实现；重复 ID 直接失败，避免 API 与 Worker 选中不同实现。"""
-        if registration.id in self._items:
-            raise ValueError(f"重复 Agent ID：{registration.id}")
-        self._items[registration.id] = registration
-
-    def get(self, identifier: str) -> AgentRegistration:
-        """取得注册项；缺失时返回明确诊断，不运行任何默认业务。"""
-        if identifier not in self._items:
-            raise AppError("agent_not_registered", "Agent 未注册", 404)
-        return self._items[identifier]
-
-    def describe(self) -> list[dict[str, Any]]:
-        """输出无秘密的公开注册信息。"""
-        return [
-            {
-                "id": item.id,
-                "framework": item.framework,
-                "input_schema": item.input_schema.model_json_schema(),
-                "output_schema": item.output_schema.model_json_schema()
-                if item.output_schema
-                else None,
-                "capabilities": sorted(item.capabilities),
-            }
-            for item in self._items.values()
-        ]

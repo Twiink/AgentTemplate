@@ -5,7 +5,10 @@ run_token_budget: 64000
 recursion_limit: 25
 lease_seconds: 60
 run_retention_days: 30
-registrations: []
+# Agent 自动发现：扫描 src/app/agents/*/agent.py 的 spec；enabled 为空表示全部启用。
+agents:
+  enabled: []
+  extraction: null
 # 模型别名白名单：只有这里声明的别名才能被引用；单价统一来自 config/pricing.yaml。
 llm:
   models: {}

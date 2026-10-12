@@ -17,7 +17,8 @@ FastAPI lifespan、CLI 和 Worker 任务使用资源容器 `Container`（`app.co
 | `llm.models`／`llm.embeddings` | 模型别名白名单，只有这里声明的别名才能被引用 |
 | `llm.default_embedding` | 默认向量别名；必须存在于 `llm.embeddings` |
 | `llm.pricing_file` | 价格表路径，默认 `config/pricing.yaml`，单价不在别名下重复填写 |
-| `registrations` | 项目注册函数引用列表 |
+| `agents.enabled` | 启用的 Agent ID；为空表示启用全部自动发现的 Agent |
+| `agents.extraction` | 长期记忆提取使用的 Agent ID；留空表示不启用后台提取 |
 | `auth.api_keys` | Key SHA-256 摘要、稳定 tenant／subject／scopes |
 | `auth.jwt_*`／`auth.jwks_url` | 签名算法、密钥或 JWKS、issuer、audience |
 | `storage` | 本地或 S3 后端、附件上限 |
@@ -46,15 +47,19 @@ FastAPI lifespan、CLI 和 Worker 任务使用资源容器 `Container`（`app.co
 
 模块迁移位于各模块的 `migrations/`，作为 Alembic 的独立分支，分支标签为模块名；核心迁移的分支标签为 `core`。`migrate` 只升级核心分支和已启用模块的分支，授权也只覆盖核心表与已启用模块的表。新增模块时在 `CATALOG` 登记静态信息，并提供带 `branch_labels` 的初始迁移。
 
-## 显式注册
+## Agent 自动发现
 
-`AgentRegistration` 包含 ID、framework、factory、输入 Schema、可选输出 Schema、capabilities。配置中的注册入口接收 `Container` 并调用 `container.agents.register`。默认没有业务注册函数；项目自行实现。
+每个 Agent 放在 `src/app/agents/<名称>/agent.py`，导出一个 `AgentSpec`（`app.agents.registry`）：`id`、`description`、`build`，可选 `input_schema`（缺省表示直接接收 messages 输入）与 `context_schema`。启动时扫描 `app.agents.*.agent`，ID 重复或某个 Agent 构建失败都会停止启动；`agents.enabled` 非空时只启用列出的 Agent。
 
-工厂签名为 `factory(context, checkpointer)`，可为异步函数。LangChain 使用原生 `create_agent`，LangGraph 使用原生 `StateGraph.compile`，两者必须使用传入的 Checkpointer。LlamaIndex 返回原生 Workflow／AgentWorkflow，不把网络客户端等资源放入 JSON 状态。
+`build(ctx)` 接收 `BuildContext`，只负责装配，不发起网络调用。`BuildContext` 提供 `settings`、`models`、`tools`、`prompts`、`checkpointer`（启用 memory 时为 `store`，治理中间件为 `middleware`）。构建结果必须是使用传入 Checkpointer 的 LangGraph 编译图；模板不校验这一点之外的图形状。
 
-`RunContext` 提供可信身份、运行和线程 ID、资源、截止时间、预算与用量。模型通过 `resources.models.chat(name)`、`llama_chat(name)` 获取，工具通过 `tools.langchain(names)`／`tools.llama(names)` 显式绑定。原生对象可访问，但直接调用原生模型会绕过模板治理，因此项目必须自行承担预算和审计边界。
+运行配置放在 `options.langgraph`。线程与检查点命名空间由服务端根据可信身份生成，客户端不得覆盖。
 
-原生运行配置分别放在 `options.langchain`、`options.langgraph`、`options.llamaindex`。线程、检查点 ID 和 Context 由服务端决定，客户端不得覆盖。
+## 运行上下文
+
+`RunContext` 提供可信身份、运行和线程 ID、资源、截止时间、预算与用量。模型通过 `resources.models.chat(别名)` 获取，工具通过 `resources.tools.langchain(names)` 显式绑定。别名必须在 `llm.models` 中声明，未声明的别名直接拒绝。
+
+原生对象可访问，但直接调用原生模型会绕过模板治理，因此项目必须自行承担预算和审计边界。
 
 ## 运行与恢复
 

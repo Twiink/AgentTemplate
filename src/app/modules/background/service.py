@@ -31,11 +31,13 @@ class BackgroundService:
 
     async def submit(self, principal, agent_id, thread_id, input, options=None):
         """校验注册 Schema 后锁住线程并创建排队运行和投递记录，返回 202 使用的资源。"""
-        registration = self.resources.agents.get(agent_id)
-        try:
-            input = registration.input_schema.model_validate(input).model_dump(mode="json")
-        except ValidationError as error:
-            raise AppError("agent_input_invalid", "输入不符合 Agent Schema", 422) from error
+        item = self.resources.agents.get(agent_id)
+        # 未声明 input_schema 的 Agent 直接接收 messages 形态的输入，不做额外校验。
+        if item.spec.input_schema is not None:
+            try:
+                input = item.spec.input_schema.model_validate(input).model_dump(mode="json")
+            except ValidationError as error:
+                raise AppError("agent_input_invalid", "输入不符合 Agent Schema", 422) from error
         options = options or {}
         if "configurable" in options or "thread_id" in options:
             raise AppError("reserved_configuration", "运行配置不能覆盖服务端线程身份")
