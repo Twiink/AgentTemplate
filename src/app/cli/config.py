@@ -24,7 +24,7 @@ def validate_config(root: str | None):
         root_path = Path(root) if root else None
         settings = load_settings(root=root_path)
 
-        click.echo("✓ 配置验证通过")
+        click.echo("配置验证通过")
         click.echo(f"\n环境: {settings.environment}")
         click.echo(f"预设: {settings.preset}")
         click.echo(f"应用名: {settings.app_name}")
@@ -42,7 +42,7 @@ def validate_config(root: str | None):
                 click.echo(f"  - {agent}")
 
     except Exception as error:
-        click.echo(f"❌ 配置验证失败: {error}", err=True)
+        click.echo(f"配置验证失败: {error}", err=True)
         sys.exit(1)
 
 
@@ -71,18 +71,18 @@ def export_config(root: str | None, output: str | None, include_secrets: bool):
 
         if output:
             Path(output).write_text(yaml_output, encoding="utf-8")
-            click.echo(f"✓ 配置已导出到: {output}")
+            click.echo(f"配置已导出到: {output}")
         else:
             click.echo(yaml_output)
 
         if not include_secrets:
             click.echo(
-                "\n⚠️  敏感字段已隐藏，使用 --include-secrets 导出完整配置（谨慎使用）",
+                "\n敏感字段已隐藏，使用 --include-secrets 导出完整配置（谨慎使用）",
                 err=True,
             )
 
     except Exception as error:
-        click.echo(f"❌ 配置导出失败: {error}", err=True)
+        click.echo(f"配置导出失败: {error}", err=True)
         sys.exit(1)
 
 
@@ -130,6 +130,6 @@ def export_schema(output: str | None):
 
     if output:
         Path(output).write_text(yaml_output, encoding="utf-8")
-        click.echo(f"✓ Schema 已导出到: {output}")
+        click.echo(f"Schema 已导出到: {output}")
     else:
         click.echo(yaml_output)

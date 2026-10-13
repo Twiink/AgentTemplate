@@ -130,7 +130,7 @@ async def revoke_key(key_id: str):
         async with container.db.transaction(system=True) as session:
             key = await session.get(ApiKey, key_id)
             if not key:
-                click.echo(f"❌ 未找到密钥: {key_id}", err=True)
+                click.echo(f"未找到密钥: {key_id}", err=True)
                 raise SystemExit(1)
 
             if key.revoked:
@@ -139,4 +139,4 @@ async def revoke_key(key_id: str):
 
             key.revoked = True
 
-        click.echo(f"✓ 已吊销密钥: {key.name} ({key_id})")
+        click.echo(f"已吊销密钥: {key.name} ({key_id})")
