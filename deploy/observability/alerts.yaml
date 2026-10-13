@@ -7,24 +7,45 @@ groups:
         for: 2m
         annotations:
           summary: Agent API 无法采集
+
       - alert: AgentAPIErrors
         expr: sum(rate(agent_http_requests_total{status=~"5.."}[5m])) / clamp_min(sum(rate(agent_http_requests_total[5m])), 0.001) > 0.05
         for: 5m
         annotations:
-          summary: API 错误率超过阈值
+          summary: API 错误率超过 5%
+
+      - alert: AgentAPILatencyHigh
+        expr: histogram_quantile(0.95, rate(agent_http_request_duration_seconds_bucket{route!~".*/stream"}[5m])) > 2
+        for: 5m
+        annotations:
+          summary: 非流式接口 P95 延迟超过 2 秒
+
       - alert: AgentRunFailures
         expr: sum(rate(agent_runs_total{status="failed"}[10m])) > 0.01
         for: 5m
         annotations:
           summary: Agent 运行持续失败
 
+      - alert: AgentLLMErrors
+        expr: sum(rate(agent_llm_requests_total{status="error"}[10m])) / clamp_min(sum(rate(agent_llm_requests_total[10m])), 0.001) > 0.1
+        for: 5m
+        annotations:
+          summary: 模型调用错误率异常升高
+
       - alert: AgentQueueBacklog
         expr: agent_queue_depth > 100
         for: 5m
         annotations:
           summary: 排队运行持续积压
+
       - alert: AgentWorkerInactive
         expr: time() - agent_worker_heartbeat_timestamp > 120
         for: 2m
         annotations:
           summary: Worker 长时间没有处理调度任务
+
+      - alert: AgentDBPoolExhausted
+        expr: agent_db_pool_connections{state="in_use"} / (agent_db_pool_connections{state="in_use"} + agent_db_pool_connections{state="idle"}) > 0.9
+        for: 5m
+        annotations:
+          summary: 数据库连接池接近耗尽
