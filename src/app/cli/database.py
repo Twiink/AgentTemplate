@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.cli.app import cli
 from app.core.config import ConfigurationError, Settings, load_settings
-from app.core.errors import AppError
+from app.core.errors import AppError, Code
 from app.db.models import CORE_TABLES
 from app.db.revisions import CORE_BRANCH, alembic_config, known_revisions
 from app.modules import ModuleError, ModuleInfo, module_tables, resolve
@@ -69,7 +69,7 @@ async def setup_checkpointer_and_grants(settings: Settings, infos: list[ModuleIn
         await saver.setup()
     runtime_role = make_url(settings.database_url.get_secret_value()).username
     if not runtime_role:
-        raise AppError("runtime_role_missing", "运行连接必须声明专门角色")
+        raise AppError(Code.RUNTIME_ROLE_MISSING, "运行连接必须声明专门角色")
     engine = create_async_engine(
         (settings.migration_database_url or settings.database_url).get_secret_value()
     )

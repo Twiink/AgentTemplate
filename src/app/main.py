@@ -39,6 +39,8 @@ def create_app(config_override=None) -> FastAPI:
             await require_preflight(settings, logger)
         async with Container(settings) as container:
             application.state.container = container
+            # 将数据库传递给 Authenticator 以支持动态 API Key
+            application.state.authenticator = Authenticator(settings.auth, container.db)
             collector = asyncio.create_task(run_metrics_collector(container))
             try:
                 yield
@@ -48,7 +50,6 @@ def create_app(config_override=None) -> FastAPI:
 
     application = FastAPI(title=settings.app_name, version=__version__, lifespan=lifespan)
     application.state.settings = settings
-    application.state.authenticator = Authenticator(settings.auth)
     application.state.logger = logger
     application.state.readiness = ReadinessCache()
     application.add_middleware(

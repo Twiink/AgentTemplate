@@ -83,6 +83,7 @@ async def run_metrics_collector(resources, interval: float = 15) -> None:
     while True:
         try:
             await collect_run_metrics(resources)
+            resources.db.update_pool_metrics()
         except Exception as error:
             if _warnings.ready("collector"):
                 resources.logger.warning(

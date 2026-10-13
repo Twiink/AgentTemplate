@@ -2,9 +2,10 @@
 
 from fastapi import APIRouter
 
-from app.api.v1 import agents, runs, threads
+from app.api.v1 import agents, quota, runs, threads
 
 router = APIRouter(prefix="/api/v1")
 router.include_router(agents.router)
 router.include_router(threads.router)
 router.include_router(runs.router)
+router.include_router(quota.router)

@@ -11,7 +11,7 @@ from pathlib import Path
 
 import yaml
 
-from app.core.errors import AppError
+from app.core.errors import AppError, Code
 
 # 价格表文件默认位置；相对运行目录，与 config/ 下其他配置一致。
 DEFAULT_PRICING_FILE = Path("config/pricing.yaml")
@@ -59,5 +59,5 @@ def require_price(table: PricingTable, provider: str, model: str, version: str |
         )
     price = table.get(provider, model)
     if price is None:
-        raise AppError("pricing_required", "价格表未收录该模型，无法计算费用", 503)
+        raise AppError(Code.PRICING_REQUIRED, "价格表未收录该模型，无法计算费用", 503)
     return price

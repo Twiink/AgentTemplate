@@ -10,7 +10,7 @@ from uuid import uuid4
 import structlog
 from fastapi import FastAPI, Request
 
-from app.core.telemetry import latency, requests
+from app.core.telemetry import http_request_duration_seconds, http_requests_total
 
 # 上游请求 ID 只接受常见字符和有限长度，避免日志注入和超长字段。
 REQUEST_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
@@ -38,8 +38,8 @@ def install_request_context(application: FastAPI, logger: Any) -> None:
             # 未处理异常同样计入指标和访问日志；异常本身由统一异常处理器记录堆栈。
             route = getattr(request.scope.get("route"), "path", "unmatched")
             elapsed = time.monotonic() - started
-            requests.labels(request.method, route, str(status)).inc()
-            latency.labels(request.method, route).observe(elapsed)
+            http_requests_total.labels(request.method, route, str(status)).inc()
+            http_request_duration_seconds.labels(request.method, route).observe(elapsed)
             principal = getattr(request.state, "principal", None)
             logger.info(
                 "接口请求完成",

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import AsyncExitStack
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import httpx
 from redis.asyncio import Redis
@@ -21,6 +21,9 @@ from app.db.session import Database
 from app.llm.gateway import ModelGateway
 from app.modules import Module, load, resolve
 from app.prompts.loader import PromptLoader
+from app.runtime.bus import BusRegistry
+from app.runtime.checkpointer import CheckpointPool, FenceLock
+from app.runtime.streams import StreamLog
 
 if TYPE_CHECKING:
     from app.modules.background.service import BackgroundService
@@ -61,8 +64,15 @@ class Container:
         # 空注册表；启动时由 build_agents 按配置发现并构建。
         self.agents = AgentRegistry(enabled=list(settings.agents.enabled))
         self.modules: list[Module] = []
-        self.checkpointer: Any = None
-        self._checkpoint_lock: asyncio.Lock | None = None
+        # 检查点与 fence 各自使用独立连接池，避免长事务占用业务连接。
+        self.checkpoints = CheckpointPool(settings)
+        self.fence = FenceLock(settings)
+        # 请求内流式输出的事件总线；跨进程续传仍以 run_events 为准。
+        self.buses = BusRegistry()
+        # 后台档的跨进程增量通道；Redis 故障时降级为 run_events 回放。
+        self.streams = StreamLog(self)
+        self.stack.push_async_callback(self.checkpoints.close)
+        self.stack.push_async_callback(self.fence.close)
         # 模块服务；对应模块未启用时保持 None。
         self.storage: ArtifactStore | None = None
         self.artifacts: ArtifactService | None = None
@@ -89,6 +99,16 @@ class Container:
             socket_timeout=5,
         )
         self.stack.push_async_callback(self.redis.aclose)
+
+        # 初始化配额、缓存和幂等性管理器
+        from app.core.cache import ResponseCache
+        from app.core.idempotency import IdempotencyManager
+        from app.core.quota import QuotaManager
+
+        self.quota = QuotaManager(self.redis, self.logger, self.settings)
+        self.cache = ResponseCache(self.redis, self.logger)
+        self.idempotency = IdempotencyManager(self.redis, self.logger)
+
         proxies = {
             p.proxy or ""
             for p in [*self.settings.llm.models.values(), *self.settings.llm.embeddings.values()]
@@ -114,6 +134,18 @@ class Container:
         self.stack.push_async_callback(self.mcp.close)
         self.threads = ThreadService(self)
         self.runs = RunService(self)
+
+        # 注册运行成功后的费用记录钩子
+        async def record_cost_hook(session, run):
+            from app.core.security import Principal
+
+            principal = Principal(run.tenant_id, run.subject_id, frozenset(run.scopes))
+            cost = run.usage.get("total_cost", 0)
+            if cost > 0:
+                await self.quota.record(principal, cost)
+
+        self.runs.succeeded_hooks.append(record_cost_hook)
+
         # 模块按依赖顺序装配，后装配的模块可以向先装配的模块登记回调。
         for info in resolve(self.settings.modules):
             module = load(info)
@@ -156,21 +188,11 @@ class Container:
             raise
 
     async def checkpoint(self):
-        """进入原生 Saver 上下文；共享连接有独立锁，迁移只在 CLI 中执行。"""
-        if self._checkpoint_lock is None:
-            raise RuntimeError("资源容器尚未进入 lifespan")
-        async with self._checkpoint_lock:
-            if self.checkpointer is None:
-                from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-                from sqlalchemy.engine import make_url
+        """返回基于独立连接池的 Saver；连接在首次使用时建立，迁移只在 CLI 中执行。
 
-                url = make_url(self.settings.database_url.get_secret_value()).set(
-                    drivername="postgresql"
-                )
-                self.checkpointer = await self.stack.enter_async_context(
-                    AsyncPostgresSaver.from_conn_string(url.render_as_string(hide_password=False))
-                )
-            return self.checkpointer
+        与旧实现不同，这里不再用单连接承载全部检查点读写，并发运行不会互相排队。
+        """
+        return await self.checkpoints.saver_instance()
 
     async def __aexit__(self, *args):
         """逆序释放已获得的全部资源。"""

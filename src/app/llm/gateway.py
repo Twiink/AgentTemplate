@@ -7,12 +7,20 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
 from langchain.chat_models import init_chat_model
 from langchain_core.language_models.chat_models import BaseChatModel
 
-from app.core.errors import AppError
+from app.core.errors import AppError, Code
+from app.core.telemetry import (
+    llm_cost_total,
+    llm_request_duration_seconds,
+    llm_requests_total,
+    llm_time_to_first_token_seconds,
+    llm_tokens_total,
+)
 from app.llm.pricing import PricingTable, load_pricing, require_price
 
 # 模板内的 provider 取值到 init_chat_model 原生 provider 的映射。
@@ -39,10 +47,12 @@ class ModelGateway:
         """取得已声明配置；别名不在白名单内时拒绝，不做隐式回退。"""
         table = self.settings.llm.embeddings if embedding else self.settings.llm.models
         if name not in table:
-            raise AppError("model_not_configured", "模型别名未在配置中声明", 503)
+            raise AppError(Code.MODEL_NOT_CONFIGURED, "模型别名未在配置中声明", 503)
         profile = table[name]
         if embedding and (not profile.dimensions or profile.provider == "anthropic"):
-            raise AppError("embedding_configuration", "向量模型必须支持 Embedding 并声明维度", 503)
+            raise AppError(
+                Code.EMBEDDING_CONFIGURATION, "向量模型必须支持 Embedding 并声明维度", 503
+            )
         return profile
 
     def price_for(self, profile):
@@ -84,7 +94,7 @@ class ModelGateway:
         """返回 LangChain BaseChatModel；使用 init_chat_model 初始化，中间件治理接管预算。"""
         p = self.profile(name)
         if required and not required <= p.capabilities:
-            raise AppError("unsupported_capability", "模型能力声明不满足请求")
+            raise AppError(Code.UNSUPPORTED_CAPABILITY, "模型能力声明不满足请求")
         if name not in self._models:
             kwargs: dict[str, Any] = {
                 "model": p.model,
@@ -100,8 +110,126 @@ class ModelGateway:
                 kwargs["api_key"] = p.api_key.get_secret_value()
             kwargs.update(p.parameters)
 
-            self._models[name] = init_chat_model(**kwargs)
+            base_model = init_chat_model(**kwargs)
+            self._models[name] = self._wrap_with_metrics(base_model, name, p)
         return self._models[name]
+
+    def _wrap_with_metrics(self, model: BaseChatModel, alias: str, profile) -> BaseChatModel:
+        """包装模型以采集调用指标；记录请求、耗时、首 token 延迟、token 用量与费用。"""
+        original_ainvoke = model.ainvoke
+        original_astream = model.astream
+
+        async def tracked_ainvoke(input, config=None, **kwargs):
+            provider = "openai" if profile.provider == "openai_compatible" else profile.provider
+            started = time.monotonic()
+
+            # 创建 OTel span 并设置 GenAI 语义约定属性
+            from opentelemetry import trace
+
+            tracer = trace.get_tracer("agent-template.llm")
+
+            with tracer.start_as_current_span(
+                f"llm.{alias}",
+                attributes={
+                    "gen_ai.system": provider,
+                    "gen_ai.request.model": alias,
+                    "gen_ai.operation.name": "chat",
+                },
+            ) as span:
+                try:
+                    result = await original_ainvoke(input, config, **kwargs)
+                    elapsed = time.monotonic() - started
+                    llm_requests_total.labels(alias, provider, "success").inc()
+                    llm_request_duration_seconds.labels(alias, provider).observe(elapsed)
+
+                    usage = getattr(result, "usage_metadata", None) or {}
+                    input_tokens = usage.get("input_tokens", 0)
+                    output_tokens = usage.get("output_tokens", 0)
+                    if input_tokens:
+                        llm_tokens_total.labels(alias, "input").inc(input_tokens)
+                        span.set_attribute("gen_ai.usage.input_tokens", input_tokens)
+                    if output_tokens:
+                        llm_tokens_total.labels(alias, "output").inc(output_tokens)
+                        span.set_attribute("gen_ai.usage.output_tokens", output_tokens)
+
+                    price = self.price_for(profile)
+                    if price and (input_tokens or output_tokens):
+                        cost = price.input * input_tokens + price.output * output_tokens
+                        llm_cost_total.labels(alias).inc(cost)
+                        span.set_attribute("gen_ai.usage.cost", cost)
+
+                    span.set_status(trace.Status(trace.StatusCode.OK))
+                    return result
+                except Exception as error:
+                    elapsed = time.monotonic() - started
+                    llm_requests_total.labels(alias, provider, "error").inc()
+                    llm_request_duration_seconds.labels(alias, provider).observe(elapsed)
+                    span.set_status(trace.Status(trace.StatusCode.ERROR, str(error)))
+                    span.record_exception(error)
+                    raise
+
+        async def tracked_astream(input, config=None, **kwargs):
+            provider = "openai" if profile.provider == "openai_compatible" else profile.provider
+            started = time.monotonic()
+            ttft = None
+            input_tokens = 0
+            output_tokens = 0
+
+            from opentelemetry import trace
+
+            tracer = trace.get_tracer("agent-template.llm")
+
+            with tracer.start_as_current_span(
+                f"llm.{alias}.stream",
+                attributes={
+                    "gen_ai.system": provider,
+                    "gen_ai.request.model": alias,
+                    "gen_ai.operation.name": "chat.stream",
+                },
+            ) as span:
+                try:
+                    async for chunk in original_astream(input, config, **kwargs):
+                        if ttft is None:
+                            ttft = time.monotonic() - started
+                            llm_time_to_first_token_seconds.labels(alias, provider).observe(ttft)
+                            span.set_attribute("gen_ai.usage.time_to_first_token", ttft)
+
+                        usage = getattr(chunk, "usage_metadata", None) or {}
+                        input_tokens = usage.get("input_tokens", 0) or input_tokens
+                        output_tokens = usage.get("output_tokens", 0) or output_tokens
+
+                        yield chunk
+
+                    elapsed = time.monotonic() - started
+                    llm_requests_total.labels(alias, provider, "success").inc()
+                    llm_request_duration_seconds.labels(alias, provider).observe(elapsed)
+
+                    if input_tokens:
+                        llm_tokens_total.labels(alias, "input").inc(input_tokens)
+                        span.set_attribute("gen_ai.usage.input_tokens", input_tokens)
+                    if output_tokens:
+                        llm_tokens_total.labels(alias, "output").inc(output_tokens)
+                        span.set_attribute("gen_ai.usage.output_tokens", output_tokens)
+
+                    price = self.price_for(profile)
+                    if price and (input_tokens or output_tokens):
+                        cost = price.input * input_tokens + price.output * output_tokens
+                        llm_cost_total.labels(alias).inc(cost)
+                        span.set_attribute("gen_ai.usage.cost", cost)
+
+                    span.set_status(trace.Status(trace.StatusCode.OK))
+
+                except Exception as error:
+                    elapsed = time.monotonic() - started
+                    llm_requests_total.labels(alias, provider, "error").inc()
+                    llm_request_duration_seconds.labels(alias, provider).observe(elapsed)
+                    span.set_status(trace.Status(trace.StatusCode.ERROR, str(error)))
+                    span.record_exception(error)
+                    raise
+
+        model.ainvoke = tracked_ainvoke
+        model.astream = tracked_astream
+        return model
 
     def http_for(self, profile):
         """复用服务商代理客户端；客户端由统一资源上下文负责释放。"""
@@ -131,7 +259,7 @@ class ModelGateway:
                 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
                 if not p.api_key:
-                    raise AppError("model_not_configured", "Gemini 向量模型必须配置密钥", 503)
+                    raise AppError(Code.MODEL_NOT_CONFIGURED, "Gemini 向量模型必须配置密钥", 503)
                 self._embeddings[name] = GoogleGenerativeAIEmbeddings(
                     model=p.model,
                     google_api_key=p.api_key.get_secret_value(),
@@ -148,7 +276,7 @@ class ModelGateway:
         async with self._limits[name], asyncio.timeout(p.timeout_seconds):
             vectors = await model.aembed_documents(texts)
         if len(vectors) != len(texts) or any(len(v) != p.dimensions for v in vectors):
-            raise AppError("embedding_dimensions", "服务商返回的向量维度不匹配")
+            raise AppError(Code.EMBEDDING_DIMENSIONS, "服务商返回的向量维度不匹配")
         return vectors
 
     async def close(self):

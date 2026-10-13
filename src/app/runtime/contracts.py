@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from app.core.errors import AppError
+from app.core.errors import AppError, Code
 from app.core.security import Principal
 
 
@@ -59,20 +59,20 @@ class RunContext:
         price 为价格表命中的单价；费用预算必须有价格，缺失时明确拒绝而不是按 0 计费。
         """
         if time.monotonic() >= self.deadline:
-            raise AppError("run_timeout", "运行已超过时间预算")
+            raise AppError(Code.RUN_TIMEOUT, "运行已超过时间预算")
         if estimated_input + max_output > profile.context_tokens:
-            raise AppError("context_budget", "输入超过模型上下文预算")
+            raise AppError(Code.CONTEXT_BUDGET, "输入超过模型上下文预算")
         used = self.usage["estimated_tokens"] + self.reserved_tokens
         if used + estimated_input + max_output > self.token_budget:
-            raise AppError("token_budget", "运行 Token 预算不足")
+            raise AppError(Code.TOKEN_BUDGET, "运行 Token 预算不足")
         if self.cost_budget is not None:
             if price is None:
-                raise AppError("pricing_required", "费用预算要求价格表收录该模型")
+                raise AppError(Code.PRICING_REQUIRED, "费用预算要求价格表收录该模型")
             projected = (
                 estimated_input * price.input_per_million + max_output * price.output_per_million
             ) / 1_000_000
             if (self.usage["cost"] or 0) + projected > self.cost_budget:
-                raise AppError("cost_budget", "运行费用预算不足")
+                raise AppError(Code.COST_BUDGET, "运行费用预算不足")
         self.reserved_tokens += estimated_input + max_output
 
     def record_usage(
@@ -96,7 +96,7 @@ class RunContext:
                     + int(outgoing) * price.output_per_million
                 ) / 1_000_000
         if self.usage["estimated_tokens"] > self.token_budget:
-            raise AppError("token_budget", "运行已超过 Token 预算")
+            raise AppError(Code.TOKEN_BUDGET, "运行已超过 Token 预算")
 
 
 # 运行期可信上下文的传递通道；阶段 3.4 改为通过 LangChain 的 context_schema 显式传入。

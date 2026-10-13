@@ -9,16 +9,16 @@ import yaml
 
 from app.cli.app import cli
 from app.cli.common import private_write
-from app.core.errors import AppError
+from app.core.errors import AppError, Code
 
 
 def initialize_observability(langfuse: bool, langsmith: bool):
     """生成本地观测服务凭据与 Collector 文件，不覆盖已有文件，不修改共享配置。"""
     if not langfuse and not langsmith:
-        raise AppError("observability_targets", "至少选择一个观测后端")
+        raise AppError(Code.OBSERVABILITY_TARGETS, "至少选择一个观测后端")
     path = Path(".data/observability.env")
     if path.exists():
-        raise AppError("observability_exists", "观测私有配置已存在；请保留并人工修改目标")
+        raise AppError(Code.OBSERVABILITY_EXISTS, "观测私有配置已存在；请保留并人工修改目标")
     secret_key = secrets.token_urlsafe(32)
     public_key = "pk-lf-" + secrets.token_hex(16)
     env = {

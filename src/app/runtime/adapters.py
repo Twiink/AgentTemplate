@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from app.core.errors import AppError
+from app.core.errors import AppError, Code
 
 
 class WaitingInput(Exception):
@@ -26,12 +26,12 @@ class LangGraphAdapter:
         graph = item.graph
         checkpointer = await context.resources.checkpoint()
         if getattr(graph, "checkpointer", None) is not checkpointer:
-            raise AppError("checkpointer_required", "项目构建必须使用模板提供的 Checkpointer")
+            raise AppError(Code.CHECKPOINTER_REQUIRED, "项目构建必须使用模板提供的 Checkpointer")
         native = dict(options.get("langgraph", {}))
         configurable = dict(native.get("configurable", {}))
         for key in {"thread_id", "checkpoint_ns", "checkpoint_id"}:
             if key in configurable:
-                raise AppError("reserved_configuration", "原生配置不能覆盖检查点身份")
+                raise AppError(Code.RESERVED_CONFIGURATION, "原生配置不能覆盖检查点身份")
         configurable["thread_id"] = context.checkpoint_thread
         config = {
             **native,

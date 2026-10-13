@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import time
 from collections.abc import Awaitable, Callable
@@ -15,14 +14,14 @@ import structlog
 from opentelemetry import propagate
 from sqlalchemy import delete, select
 
-from app.core.errors import AppError
+from app.core.errors import AppError, Code
 from app.core.security import Principal
-from app.core.telemetry import runs as run_metric
+from app.core.telemetry import run_duration_seconds
+from app.core.telemetry import runs_total as run_metric
 from app.db.models import Run, RunEvent, Thread, now
 from app.db.repository import attributes, owned, serialize
 from app.runtime.contracts import RunContext, current_run
-
-TERMINAL = {"succeeded", "failed", "cancelled"}
+from app.runtime.events import TERMINAL, Event
 
 
 def classify(error: Exception, context: RunContext) -> dict[str, str]:
@@ -58,19 +57,37 @@ class RunService:
         )
 
     async def emit(self, context, kind, payload):
-        """追加事件时核验租约所有者，过期 Worker 不能覆盖或继续发布结果。"""
+        """追加事件时核验租约所有者，过期 Worker 不能覆盖或继续发布结果。
+
+        落库与推送分开：关键事件写 run_events，全部事件同时进入进程内总线，
+        使请求内的流式订阅能立即收到增量，而不必轮询数据库。
+        """
+        from app.runtime.events import canonical
+
         payload = json.loads(json.dumps(payload, default=str))
-        async with self.db.transaction(context.principal) as session:
-            run = (
-                await session.scalars(
-                    select(Run)
-                    .where(Run.id == context.run_id, *owned(Run, context.principal))
-                    .with_for_update()
-                )
-            ).one()
-            if run.lease_token != context.lease_token or run.status != "running":
-                raise AppError("lease_lost", "执行租约已失效", 409)
-            await self.append_event(session, run, kind, payload)
+        name, persist = canonical(kind, payload)
+        sequence = None
+        if persist:
+            async with self.db.transaction(context.principal) as session:
+                run = (
+                    await session.scalars(
+                        select(Run)
+                        .where(Run.id == context.run_id, *owned(Run, context.principal))
+                        .with_for_update()
+                    )
+                ).one()
+                if run.lease_token != context.lease_token or run.status != "running":
+                    raise AppError(Code.LEASE_LOST, "执行租约已失效", 409)
+                await self.append_event(session, run, kind, payload)
+                sequence = run.event_sequence
+        self.resources.buses.publish(
+            context.run_id, Event(name=name, payload=payload, sequence=sequence, persisted=persist)
+        )
+        # 后台档需要跨进程送达，因此关键事件与增量同时进入 Redis Streams；Redis 故障时
+        # 订阅端回落到 run_events 回放，这里不会因为发布失败而中断执行。
+        await self.resources.streams.append(
+            context.run_id, Event(name=name, payload=payload, sequence=sequence, persisted=persist)
+        )
 
     async def persist_usage(self, context):
         """每次模型调用后保存累计用量，恢复时不重置已消费预算。"""
@@ -79,7 +96,7 @@ class RunService:
                 await session.scalars(select(Run).where(Run.id == context.run_id).with_for_update())
             ).one()
             if run.lease_token != context.lease_token:
-                raise AppError("lease_lost", "执行租约已失效", 409)
+                raise AppError(Code.LEASE_LOST, "执行租约已失效", 409)
             run.usage = dict(context.usage)
 
     async def snapshot(self, context, payload):
@@ -90,7 +107,7 @@ class RunService:
                 await session.scalars(select(Run).where(Run.id == context.run_id).with_for_update())
             ).one()
             if run.lease_token != context.lease_token:
-                raise AppError("lease_lost", "执行租约已失效", 409)
+                raise AppError(Code.LEASE_LOST, "执行租约已失效", 409)
             run.snapshot = payload
             run.usage = dict(context.usage)
 
@@ -108,11 +125,21 @@ class RunService:
                 thread.active_run = None
                 await self.append_event(session, run, "status", {"status": "cancelled"})
                 return None
+            # 记录队列等待时间：从创建到领取的耗时
+            wait_seconds = (now() - run.created_at).total_seconds()
+            from app.core.telemetry import run_queue_wait_seconds
+
+            run_queue_wait_seconds.observe(wait_seconds)
+
             token = str(uuid4())
             run.status, run.lease_token = "running", token
             run.lease_until = now() + timedelta(seconds=self.resources.settings.lease_seconds)
             await self.append_event(session, run, "status", {"status": "running"})
-            return run
+            sequence = run.event_sequence
+        # 领取成功后把事件流游标抬到当前序号：不落库的增量事件接在它之上编号，
+        # 才不会出现小于已落库序号的 ID，续传的订阅端也就不会跳过它们。
+        await self.resources.streams.seed(run_id, sequence)
+        return run
 
     async def heartbeat(self, context, execution):
         """续租并检查取消；失去租约或收到取消时终止当前协程，释放资源。"""
@@ -158,28 +185,135 @@ class RunService:
                 for hook in self.succeeded_hooks:
                     await hook(session, run)
 
-    async def execute(self, run_id: str):
-        """持有线程会话级 advisory lock，失效 Worker 尚存时不允许第二实例写检查点。"""
-        from sqlalchemy import text
+    async def submit(self, principal, agent_id, thread_id, input, options=None, *, queued=True):
+        """锁住线程并创建运行记录；queued 为真时交给后台投递，否则由请求内直接执行。
 
+        两档共用同一段校验与互斥逻辑，避免同步与异步两条路径出现行为差异。
+        """
+        from app.db.models import Thread
+
+        # 检查费用配额
+        await self.resources.quota.check(principal)
+
+        item = self.resources.agents.get(agent_id)
+        # 未声明 input_schema 的 Agent 直接接收 messages 形态的输入，不做额外校验。
+        if item.spec.input_schema is not None:
+            try:
+                input = item.spec.input_schema.model_validate(input).model_dump(mode="json")
+            except Exception as error:
+                raise AppError(Code.AGENT_INPUT_INVALID, "输入不符合 Agent Schema", 422) from error
+        options = options or {}
+        # 原生配置不允许触及服务端身份字段，否则会绕过线程与检查点隔离。
+        native = options.get("langgraph", {})
+        if "configurable" in native or "thread_id" in options:
+            raise AppError(Code.RESERVED_CONFIGURATION, "运行配置不能覆盖服务端线程身份")
+        carrier = {}
+        propagate.inject(carrier)
+        async with self.db.transaction(principal) as session:
+            thread = (
+                await session.scalars(
+                    select(Thread)
+                    .where(Thread.id == thread_id, *owned(Thread, principal))
+                    .with_for_update()
+                )
+            ).one_or_none()
+            if thread is None:
+                raise AppError(Code.RESOURCE_NOT_FOUND, "线程不存在", 404)
+            if thread.active_run:
+                raise AppError(Code.THREAD_BUSY, "同一线程已有活动运行", 409)
+            run = Run(
+                **attributes(principal),
+                agent_id=agent_id,
+                thread_id=thread_id,
+                input=input,
+                options=options,
+                status="queued" if queued else "running",
+                scopes=sorted(principal.scopes),
+                trace_context=carrier,
+            )
+            session.add(run)
+            await session.flush()
+            thread.active_run = run.id
+            if queued:
+                # 后台档：同一事务写入 outbox，由调度进程投递。
+                from app.modules.background.models import Outbox
+
+                session.add(Outbox(**attributes(principal), task="run", resource_id=run.id))
+            await self.append_event(session, run, "status", {"status": "queued"})
+            return serialize(run)
+
+    async def resume(self, principal, run_id, response, expected_sequence):
+        """消费等待状态并继续执行；expected_sequence 防止重复提交与旧页面误操作。"""
+        from app.db.models import Run as RunModel
+
+        async with self.db.transaction(principal) as session:
+            run = (
+                await session.scalars(
+                    select(RunModel)
+                    .where(RunModel.id == run_id, *owned(RunModel, principal))
+                    .with_for_update()
+                )
+            ).one_or_none()
+            if run is None:
+                raise AppError(Code.RESOURCE_NOT_FOUND, "运行不存在", 404)
+            if run.status != "waiting_input" or run.event_sequence != expected_sequence:
+                raise AppError(Code.RESUME_CONFLICT, "运行已恢复或响应版本过期", 409)
+            if run.cancel_requested:
+                raise AppError(Code.RUN_CANCELLED, "运行已取消", 409)
+            run.resume, run.status, run.pending = response, "queued", None
+            await self.append_event(session, run, "status", {"status": "queued"})
+            return serialize(run)
+
+    async def run_inline(self, principal, run_id: str):
+        """在请求内执行运行；客户端断开时由调用方取消任务，检查点保留可继续。"""
+        await self.execute(run_id)
+        return await self.resources.repository.get(Run, run_id, principal)
+
+    async def finish_cancelled(self, principal, run_id: str) -> None:
+        """把已取消的请求内运行置为终态；已在终态时不重复写入。
+
+        异步取消会在 _execute 内完成一次收尾，这里只兜底处理尚未落到终态的情况，
+        因此必须幂等，否则事件序号会被重复推进。
+        """
+        async with self.db.transaction(principal) as session:
+            run = (
+                await session.scalars(
+                    select(Run).where(Run.id == run_id, *owned(Run, principal)).with_for_update()
+                )
+            ).one_or_none()
+            if run is None or run.status in TERMINAL:
+                return
+            run.status, run.cancel_requested = "cancelled", True
+            run.lease_token, run.lease_until = None, None
+            run.completed_at = now()
+            thread = (
+                await session.scalars(
+                    select(Thread).where(Thread.id == run.thread_id).with_for_update()
+                )
+            ).one()
+            if thread.active_run == run.id:
+                thread.active_run = None
+            await self.append_event(session, run, "status", {"status": "cancelled"})
+
+    async def execute(self, run_id: str):
+        """持有线程会话级 advisory lock，失效 Worker 尚存时不允许第二实例写检查点。
+
+        锁使用独立的 fence 连接池，不再占用业务连接池；并发运行时锁竞争会等待而不是
+        直接失败，避免同一进程内的请求内执行互相拒绝。
+        """
         async with self.db.transaction(system=True) as session:
             row = await session.get(Run, run_id)
             if row is None:
                 return
             namespace = f"{row.tenant_id}\0{row.subject_id}\0{row.thread_id}"
-        key = int.from_bytes(hashlib.sha256(namespace.encode()).digest()[:8], "big", signed=True)
-        async with self.db.engine.connect() as fence:
-            acquired = (
-                await fence.execute(text("SELECT pg_try_advisory_lock(:key)"), {"key": key})
-            ).scalar_one()
-            await fence.commit()
-            if not acquired:
-                return
-            try:
-                await self._execute(run_id)
-            finally:
-                await fence.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": key})
-                await fence.commit()
+        key = self.resources.fence.key(namespace)
+        fence = await self.resources.fence.hold(key)
+        if fence is None:
+            return
+        try:
+            await self._execute(run_id)
+        finally:
+            await self.resources.fence.release(fence, key)
 
     async def _execute(self, run_id: str):
         """运行原生适配器并维护心跳；错误只保存脱敏代码和描述，收费调用不自动重复。"""
@@ -268,9 +402,8 @@ class RunService:
         status = "failed"
         try:
             output = await execution
-            context.usage["elapsed_seconds"] = (
-                context.usage.get("elapsed_seconds", 0) + time.monotonic() - started
-            )
+            elapsed = time.monotonic() - started
+            context.usage["elapsed_seconds"] = context.usage.get("elapsed_seconds", 0) + elapsed
             output = json.loads(
                 json.dumps(
                     output,
@@ -282,18 +415,16 @@ class RunService:
             status = "succeeded"
             await self.finish(context, status, output=output)
         except WaitingInput as waiting:
-            context.usage["elapsed_seconds"] = (
-                context.usage.get("elapsed_seconds", 0) + time.monotonic() - started
-            )
+            elapsed = time.monotonic() - started
+            context.usage["elapsed_seconds"] = context.usage.get("elapsed_seconds", 0) + elapsed
             status = "waiting_input"
             await self.finish(context, status, pending=waiting.pending)
         except asyncio.CancelledError:
             status = "cancelled"
             await self.finish(context, status)
         except Exception as error:
-            context.usage["elapsed_seconds"] = (
-                context.usage.get("elapsed_seconds", 0) + time.monotonic() - started
-            )
+            elapsed = time.monotonic() - started
+            context.usage["elapsed_seconds"] = context.usage.get("elapsed_seconds", 0) + elapsed
             self.resources.logger.error(
                 "运行失败",
                 run_id=run.id,
@@ -314,6 +445,9 @@ class RunService:
         finally:
             heartbeat.cancel()
             await asyncio.gather(heartbeat, return_exceptions=True)
+            # 运行结束前写出剩余增量，并给出事件流的过期时间；Redis 故障只降级。
+            run_duration_seconds.labels(run.agent_id, status).observe(time.monotonic() - started)
+            await self.resources.streams.close(run.id)
             run_metric.labels(run.agent_id, status).inc()
 
     async def cancel(self, principal, run_id):
@@ -325,7 +459,7 @@ class RunService:
                 )
             ).one_or_none()
             if run is None:
-                raise AppError("resource_not_found", "运行不存在", 404)
+                raise AppError(Code.RESOURCE_NOT_FOUND, "运行不存在", 404)
             if run.status in TERMINAL:
                 return serialize(run)
             run.cancel_requested = True

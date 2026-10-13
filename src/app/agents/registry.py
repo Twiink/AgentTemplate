@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
-from app.core.errors import AppError
+from app.core.errors import AppError, Code
 
 if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
@@ -82,15 +82,17 @@ class AgentRegistry:
             if spec is None:
                 continue
             if not isinstance(spec, AgentSpec):
-                raise AppError("agent_spec_invalid", f"{module.name} 的 spec 不是 AgentSpec")
+                raise AppError(Code.AGENT_SPEC_INVALID, f"{module.name} 的 spec 不是 AgentSpec")
             if spec.id in found:
-                raise AppError("agent_id_duplicate", f"重复的 Agent ID：{spec.id}")
+                raise AppError(Code.AGENT_ID_DUPLICATE, f"重复的 Agent ID：{spec.id}")
             found[spec.id] = spec
         # enabled 非空时只保留列出的 Agent；未列出的不构建，也不出现在 /agents 中。
         if self.enabled:
             missing = [name for name in self.enabled if name not in found]
             if missing:
-                raise AppError("agent_not_found", "配置启用的 Agent 不存在：" + "、".join(missing))
+                raise AppError(
+                    Code.AGENT_NOT_FOUND, "配置启用的 Agent 不存在：" + "、".join(missing)
+                )
             found = {name: spec for name, spec in found.items() if name in self.enabled}
         return list(found.values())
 
@@ -119,7 +121,7 @@ class AgentRegistry:
     def get(self, identifier: str) -> RegisteredAgent:
         """取得已构建的 Agent；缺失时返回明确诊断，不运行任何默认业务。"""
         if identifier not in self.items:
-            raise AppError("agent_not_registered", "Agent 未注册", 404)
+            raise AppError(Code.AGENT_NOT_REGISTERED, "Agent 未注册")
         return self.items[identifier]
 
     def describe(self) -> list[dict[str, Any]]:

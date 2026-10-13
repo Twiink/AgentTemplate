@@ -9,12 +9,23 @@ from pydantic import BaseModel, Field
 
 
 class RunInput(BaseModel):
-    """运行输入由注册 Schema 再次验证；原生配置在各框架命名空间下。"""
+    """运行输入由 Agent 的 input_schema 再次验证；原生配置放在 options.langgraph 下。"""
 
     agent_id: str
-    thread_id: str
     input: dict[str, Any]
     options: dict[str, Any] = Field(default_factory=dict)
+
+
+class ConfirmInput(BaseModel):
+    """人工审批后继续执行；用 resume 取代 input，并带序号防止重复提交。
+
+    run_id 指向处于 waiting_input 的运行；expected_sequence 为等待事件序号，
+    运行已被恢复或页面过期时明确冲突，而不是继续执行一次不确定的恢复。
+    """
+
+    run_id: str
+    resume: dict[str, Any]
+    expected_sequence: int = Field(ge=1)
 
 
 class HumanInput(BaseModel):

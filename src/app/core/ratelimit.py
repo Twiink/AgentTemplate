@@ -8,7 +8,7 @@ from typing import Annotated
 from fastapi import Depends, Request
 from redis.exceptions import RedisError
 
-from app.core.errors import AppError
+from app.core.errors import AppError, Code
 from app.core.logging import Throttle
 from app.core.security import Principal, current_principal
 from app.core.telemetry import ratelimit_backend_errors, ratelimit_rejections
@@ -42,9 +42,9 @@ async def limited_principal(
                 exception_type=type(error).__name__,
             )
         if settings.rate_limit_failure_mode == "closed":
-            raise AppError("rate_limit_unavailable", "限流服务暂不可用", 503, True) from error
+            raise AppError(Code.RATE_LIMIT_UNAVAILABLE, "限流服务暂不可用", 503, True) from error
         return principal
     if count > settings.rate_limit_per_minute:
         ratelimit_rejections.labels(route).inc()
-        raise AppError("rate_limited", "请求过于频繁", 429, True)
+        raise AppError(Code.RATE_LIMITED, "请求过于频繁", 429, True)
     return principal

@@ -172,6 +172,17 @@ class TraceConfig(StrictModel):
     langsmith_project: str | None = None
 
 
+class SentryConfig(StrictModel):
+    """Sentry 错误追踪；开发环境默认关闭，生产环境按需启用。"""
+
+    enabled: bool = False
+    dsn: SecretStr | None = None
+    environment: str | None = None
+    traces_sample_rate: float = Field(default=0.1, ge=0, le=1)
+    profiles_sample_rate: float = Field(default=0.1, ge=0, le=1)
+    send_default_pii: bool = False
+
+
 class AgentConfig(StrictModel):
     """Agent 发现配置；enabled 为空表示启用全部自动发现的 Agent。"""
 
@@ -218,6 +229,7 @@ class Settings(BaseSettings):
     tools: ToolConfig = Field(default_factory=ToolConfig)
     mcp: dict[str, MCPServer] = Field(default_factory=dict)
     tracing: TraceConfig = Field(default_factory=TraceConfig)
+    sentry: SentryConfig = Field(default_factory=SentryConfig)
     # Agent 改为自动发现：扫描 app.agents.*.agent 中的 spec，用过 agents.enabled 限定。
     agents: AgentConfig = Field(default_factory=AgentConfig)
     prompts_directory: Path = Path("prompts")

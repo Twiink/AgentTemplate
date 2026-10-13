@@ -6,7 +6,7 @@ from typing import Any
 
 from sqlalchemy import select
 
-from app.core.errors import AppError
+from app.core.errors import AppError, Code
 
 
 def owned(model, principal):
@@ -73,5 +73,5 @@ class Repository:
                 )
             ).one_or_none()
             if row is None:
-                raise AppError("resource_not_found", "资源不存在", 404)
+                raise AppError(Code.RESOURCE_NOT_FOUND, "资源不存在", 404)
             return serialize(row)

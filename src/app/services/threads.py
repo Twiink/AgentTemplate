@@ -6,7 +6,7 @@ import hashlib
 
 from sqlalchemy import select
 
-from app.core.errors import AppError
+from app.core.errors import AppError, Code
 from app.core.security import Principal
 from app.db.models import Thread
 from app.db.repository import attributes, owned, serialize
@@ -48,9 +48,9 @@ class ThreadService:
                 )
             ).one_or_none()
             if row is None:
-                raise AppError("resource_not_found", "线程不存在", 404)
+                raise AppError(Code.RESOURCE_NOT_FOUND, "线程不存在", 404)
             if row.active_run:
-                raise AppError("thread_busy", "线程有未结束运行", 409)
+                raise AppError(Code.THREAD_BUSY, "线程有未结束运行", 409)
             # 先保持行锁阻止新运行，再删除原生状态；删除失败不移除归属记录。
             namespace = checkpoint_namespace(principal, thread_id)
             saver = await self.resources.checkpoint()

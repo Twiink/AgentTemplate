@@ -225,7 +225,7 @@ def migration_result(
     settings: Settings, tables: set[str], revisions: list[str], branches: list[str]
 ) -> CheckResult:
     """比较数据库版本与代码中的迁移版本链；核心与每个启用模块的分支都要升级到最新版本。"""
-    from app.db.revisions import branch_heads, known_revisions
+    from app.db.revisions import known_revisions, pending_heads
 
     if "alembic_version" not in tables:
         if tables:
@@ -237,7 +237,9 @@ def migration_result(
             )
         return CheckResult("迁移", "failed", "数据库尚未初始化", "执行 agent-template migrate")
     known = known_revisions()
-    heads = branch_heads(branches)
+    # 期望值不是「每个分支头各占一行」：带 depends_on 的迁移会用 UPDATE 改写被依赖
+    # 版本的版本行，因此分支头可能不在版本表里却已经应用。这里判断的是尚未应用的分支头。
+    pending = pending_heads(branches, revisions)
     unknown = [revision for revision in revisions if revision not in known]
     if not revisions or unknown:
         return CheckResult(
@@ -247,12 +249,12 @@ def migration_result(
             "确认部署的代码版本；数据库可能来自更新的版本或其他项目",
         )
     current = "、".join(sorted(revisions))
-    if not heads <= set(revisions):
+    if pending:
         failing = settings.preflight.pending_migrations == "fail"
         return CheckResult(
             "迁移",
             "failed" if failing else "warning",
-            f"存在未执行的迁移：当前 {current}，目标 {'、'.join(sorted(heads))}",
+            f"存在未执行的迁移：当前 {current}，待升级 {'、'.join(sorted(pending))}",
             "执行 agent-template migrate",
             blocking=failing,
         )
@@ -376,6 +378,119 @@ async def check_redis(settings: Settings) -> list[CheckResult]:
     return [CheckResult("Redis", "passed", "已连接")]
 
 
+async def check_llm_reachability(settings: Settings) -> list[CheckResult]:
+    """检查配置的 LLM 模型是否可达；仅测试连通性，不实际调用模型。"""
+    import httpx
+
+    models = settings.llm.models
+    if not models:
+        return []
+
+    results = []
+    timeout = settings.preflight.timeout_seconds
+
+    # 按 provider 分组检查，避免重复测试相同的 base_url
+    checked_endpoints = set()
+
+    for _alias, profile in models.items():
+        # 跳过没有 base_url 的配置
+        if not profile.base_url:
+            continue
+
+        endpoint = str(profile.base_url)
+        if endpoint in checked_endpoints:
+            continue
+
+        checked_endpoints.add(endpoint)
+
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                # 简单的健康检查，不实际调用模型
+                response = await client.get(endpoint, timeout=timeout)
+                # 2xx 或 4xx 都表示服务可达（4xx 可能是认证问题，但服务在线）
+                if response.status_code < 500:
+                    results.append(
+                        CheckResult(
+                            f"LLM 服务 {profile.provider}",
+                            "passed",
+                            f"{endpoint} 可达",
+                            blocking=False,
+                        )
+                    )
+                else:
+                    results.append(
+                        CheckResult(
+                            f"LLM 服务 {profile.provider}",
+                            "warning",
+                            f"{endpoint} 返回 {response.status_code}",
+                            "检查服务状态和网络连接",
+                            blocking=False,
+                        )
+                    )
+        except Exception as error:
+            results.append(
+                CheckResult(
+                    f"LLM 服务 {profile.provider}",
+                    "warning",
+                    f"{endpoint} 无法连接（{type(error).__name__}）",
+                    "确认服务已启动，检查 base_url 和网络连接",
+                    blocking=False,
+                )
+            )
+
+    return results
+
+
+async def check_mcp_servers(settings: Settings) -> list[CheckResult]:
+    """检查配置的 MCP 服务器是否可用；非阻断项。"""
+    mcp_config = settings.mcp
+    if not mcp_config:
+        return []
+
+    results = []
+
+    for name, server_config in mcp_config.items():
+        command = server_config.command
+        if not command:
+            results.append(
+                CheckResult(
+                    f"MCP 服务器 {name}",
+                    "warning",
+                    "未配置启动命令",
+                    "在 mcp 配置中添加 command",
+                    blocking=False,
+                )
+            )
+            continue
+
+        # 检查命令是否存在
+        import shutil
+
+        cmd_path = shutil.which(command)
+
+        if cmd_path:
+            results.append(
+                CheckResult(
+                    f"MCP 服务器 {name}",
+                    "passed",
+                    f"命令 {command} 可用",
+                    blocking=False,
+                )
+            )
+        else:
+            results.append(
+                CheckResult(
+                    f"MCP 服务器 {name}",
+                    "warning",
+                    f"命令 {command} 未找到",
+                    f"安装 {command} 或检查 PATH",
+                    blocking=False,
+                )
+            )
+
+    return results
+
+
 async def run_preflight(settings: Settings) -> PreflightReport:
     """依次执行全部检查；数据库与 Redis 的网络检查并行进行。"""
     report = PreflightReport()
@@ -383,8 +498,13 @@ async def run_preflight(settings: Settings) -> PreflightReport:
     report.results += check_modules(settings)
     report.results += check_environment(settings)
     report.results += check_directories(settings)
-    database, redis = await asyncio.gather(check_database(settings), check_redis(settings))
-    report.results += database + redis
+    database, redis, llm, mcp = await asyncio.gather(
+        check_database(settings),
+        check_redis(settings),
+        check_llm_reachability(settings),
+        check_mcp_servers(settings),
+    )
+    report.results += database + redis + llm + mcp
     return report
 
 

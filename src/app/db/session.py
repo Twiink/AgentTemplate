@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async
 
 from app.core.config import Settings
 from app.core.security import Principal
+from app.core.telemetry import db_pool_connections
 
 
 def watch_slow_queries(engine: AsyncEngine, threshold_ms: int) -> None:
@@ -71,3 +72,9 @@ class Database:
     async def close(self) -> None:
         """释放全部连接；调用者应在 MCP、运行任务等消费者停止后执行。"""
         await self.engine.dispose()
+
+    def update_pool_metrics(self) -> None:
+        """更新连接池指标；由周期采集调用。"""
+        pool = self.engine.pool
+        db_pool_connections.labels("in_use").set(pool.checkedout())
+        db_pool_connections.labels("idle").set(pool.size() - pool.checkedout())

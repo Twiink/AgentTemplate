@@ -11,10 +11,10 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, Owned, identifier, now
 
-__all__ = ["Base", "Owned", "Run", "RunEvent", "Thread", "ToolCall", "identifier", "now"]
+__all__ = ["Base", "Owned", "Run", "RunEvent", "Thread", "ToolCall", "ApiKey", "identifier", "now"]
 
 # 核心表名；迁移授权与启动预检的行级安全检查按此清单执行，模块表由各模块声明。
-CORE_TABLES = ("threads", "runs", "run_events", "tool_calls")
+CORE_TABLES = ("threads", "runs", "run_events", "tool_calls", "api_keys")
 
 
 class Thread(Owned, Base):
@@ -73,3 +73,16 @@ class ToolCall(Owned, Base):
     status: Mapped[str] = mapped_column(String(30))
     result: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
     __table_args__ = (UniqueConstraint("run_id", "call_id"),)
+
+
+class ApiKey(Owned, Base):
+    """API Key 管理；存储 SHA-256 摘要，不保存明文密钥，支持吊销和过期。"""
+
+    __tablename__ = "api_keys"
+    name: Mapped[str] = mapped_column(String(255))
+    digest: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    scopes: Mapped[list[str]] = mapped_column(JSONB)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked: Mapped[bool] = mapped_column(default=False)
+    __table_args__ = (Index("ix_api_keys_owner", "tenant_id", "subject_id"),)
