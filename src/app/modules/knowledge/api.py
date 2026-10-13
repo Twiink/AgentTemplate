@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import Response
 
 from app.api.deps import Identity, Limit, Offset, Resources
-from app.core.errors import AppError
+from app.core.errors import AppError, Code
 from app.modules.knowledge.models import Document, ImportJob, KnowledgeBase
 from app.modules.knowledge.schemas import (
     DocumentOut,
@@ -30,7 +30,7 @@ router = APIRouter(tags=["knowledge"])
 def get_knowledge(container: Resources) -> KnowledgeService:
     """取得知识服务；路由只在 knowledge 模块启用时注册，服务缺失说明装配异常。"""
     if container.knowledge is None:
-        raise AppError("module_unavailable", "knowledge 模块未装配", 503)
+        raise AppError(Code.MODULE_UNAVAILABLE, "knowledge 模块未装配", 503)
     return container.knowledge
 
 
@@ -92,7 +92,7 @@ async def import_status(
     principal.require("resources:read")
     row = await container.repository.get(ImportJob, job_id, principal)
     if row["knowledge_id"] != knowledge_id:
-        raise AppError("resource_not_found", "导入任务不存在", 404)
+        raise AppError(Code.RESOURCE_NOT_FOUND, "导入任务不存在", 404)
     return row
 
 
@@ -109,9 +109,23 @@ async def import_action(
 async def search_knowledge(
     knowledge_id: str, body: SearchInput, principal: Identity, knowledge: Knowledge
 ) -> dict:
-    """执行真实向量检索与可选重排。"""
+    """执行向量、关键词或混合检索，支持可选重排。"""
     principal.require("resources:read")
-    return {"items": await knowledge.search(principal, knowledge_id, **body.model_dump())}
+    params = body.model_dump()
+    search_mode = params.pop("search_mode")
+
+    if search_mode == "vector":
+        results = await knowledge.search(principal, knowledge_id, **params)
+    elif search_mode == "keyword":
+        results = await knowledge.keyword_search(
+            principal, knowledge_id, params["query"], params["top_k"], params.get("metadata")
+        )
+    elif search_mode == "hybrid":
+        results = await knowledge.hybrid_search(principal, knowledge_id, **params)
+    else:
+        raise AppError(Code.INVALID_PARAMETER, "search_mode 必须是 vector/keyword/hybrid")
+
+    return {"items": results}
 
 
 @router.post("/knowledge/{knowledge_id}/rebuild", status_code=202, response_model=KnowledgeIndexOut)
@@ -135,7 +149,7 @@ async def delete_document(
     principal.require("resources:write")
     row = await container.repository.get(Document, document_id, principal)
     if row["knowledge_id"] != knowledge_id:
-        raise AppError("resource_not_found", "文档不存在", 404)
+        raise AppError(Code.RESOURCE_NOT_FOUND, "文档不存在", 404)
     await knowledge.delete_document(principal, document_id)
     return Response(status_code=204)
 

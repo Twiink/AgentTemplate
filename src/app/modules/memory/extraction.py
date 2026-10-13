@@ -9,7 +9,7 @@ import re
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from app.core.errors import AppError
+from app.core.errors import AppError, Code
 from app.core.security import Principal
 from app.db.models import Run
 from app.db.repository import attributes
@@ -74,7 +74,7 @@ class ExtractionService:
                 return
             source = await session.get(Run, job.source_run_id)
             if source is None:
-                raise AppError("memory_source_missing", "提取来源运行不存在")
+                raise AppError(Code.MEMORY_SOURCE_MISSING, "提取来源运行不存在")
             principal = Principal(source.tenant_id, source.subject_id, frozenset(source.scopes))
             extraction_id = job.extraction_run_id
             source_input, source_output, source_id = source.input, source.output, source.id
@@ -98,7 +98,7 @@ class ExtractionService:
                     session.add(Outbox(**attributes(principal), task="memory", resource_id=job_id))
                 return
             if run["status"] != "succeeded":
-                raise AppError("memory_extractor_failed", "提取器未成功完成")
+                raise AppError(Code.MEMORY_EXTRACTOR_FAILED, "提取器未成功完成")
             result = ExtractionOutput.model_validate(run["output"])
             async with self.db.transaction(principal) as session:
                 job = (

@@ -8,7 +8,7 @@ from collections.abc import Awaitable, Callable
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.errors import AppError
+from app.core.errors import AppError, Code
 from app.db.models import identifier
 from app.db.repository import attributes, owned, serialize
 from app.modules.storage.models import Artifact
@@ -29,7 +29,7 @@ class ArtifactService:
     async def upload(self, principal, filename: str, content_type: str, data: bytes):
         """先保存实际内容再登记元数据；登记失败立即清理孤立对象。"""
         if len(data) > self.resources.settings.storage.max_bytes:
-            raise AppError("artifact_too_large", "附件超过大小限制", 413)
+            raise AppError(Code.ARTIFACT_TOO_LARGE, "附件超过大小限制", 413)
         key = identifier()
         await self.store.put(key, data, content_type)
         try:
@@ -58,7 +58,7 @@ class ArtifactService:
                 )
             ).one_or_none()
             if row is None:
-                raise AppError("resource_not_found", "附件不存在", 404)
+                raise AppError(Code.RESOURCE_NOT_FOUND, "附件不存在", 404)
             metadata, key = serialize(row), row.object_key
         return metadata, await self.store.get(key)
 
@@ -73,9 +73,9 @@ class ArtifactService:
                 )
             ).one_or_none()
             if row is None:
-                raise AppError("resource_not_found", "附件不存在", 404)
+                raise AppError(Code.RESOURCE_NOT_FOUND, "附件不存在", 404)
             for in_use in self.guards:
                 if await in_use(session, artifact_id):
-                    raise AppError("artifact_in_use", "附件仍被其他资源引用", 409)
+                    raise AppError(Code.ARTIFACT_IN_USE, "附件仍被其他资源引用", 409)
             await self.store.delete(row.object_key)
             await session.delete(row)

@@ -18,6 +18,15 @@ class MemoryInput(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class SemanticSearchInput(BaseModel):
+    """语义检索输入参数。"""
+
+    query: str = Field(min_length=1, max_length=20000)
+    namespace: str | None = None
+    top_k: int = Field(default=10, ge=1, le=50)
+    min_score: float = Field(default=0.7, ge=0.0, le=1.0)
+
+
 class MemoryOut(BaseModel):
     """长期记忆及其来源；同键更新时 version 递增。"""
 
@@ -31,3 +40,4 @@ class MemoryOut(BaseModel):
     version: int
     updated_at: datetime
     expires_at: datetime | None = None
+    score: float | None = None

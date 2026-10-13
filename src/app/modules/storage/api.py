@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, UploadFile
 from fastapi.responses import Response
 
 from app.api.deps import Identity, Limit, Offset, Resources
-from app.core.errors import AppError
+from app.core.errors import AppError, Code
 from app.modules.storage.models import Artifact
 from app.modules.storage.schemas import ArtifactOut
 from app.modules.storage.service import ArtifactService
@@ -21,7 +21,7 @@ router = APIRouter(tags=["artifacts"])
 def get_artifacts(container: Resources) -> ArtifactService:
     """取得附件服务；路由只在 storage 模块启用时注册，服务缺失说明装配异常。"""
     if container.artifacts is None:
-        raise AppError("module_unavailable", "storage 模块未装配", 503)
+        raise AppError(Code.MODULE_UNAVAILABLE, "storage 模块未装配", 503)
     return container.artifacts
 
 

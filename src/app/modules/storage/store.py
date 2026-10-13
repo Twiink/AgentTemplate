@@ -4,7 +4,7 @@ import asyncio
 from pathlib import Path
 from typing import Protocol
 
-from app.core.errors import AppError
+from app.core.errors import AppError, Code
 
 
 class ArtifactStore(Protocol):
@@ -33,10 +33,10 @@ class LocalStore:
     def path(self, key: str) -> Path:
         """验证服务端对象键，不把用户文件名拼入文件系统路径。"""
         if not key.replace("-", "").isalnum():
-            raise AppError("invalid_object_key", "对象键无效")
+            raise AppError(Code.INVALID_OBJECT_KEY, "对象键无效")
         path = (self.directory / key).resolve()
         if not path.is_relative_to(self.directory):
-            raise AppError("invalid_object_key", "对象键越界")
+            raise AppError(Code.INVALID_OBJECT_KEY, "对象键越界")
         return path
 
     async def put(self, key: str, content: bytes, content_type: str) -> None:
@@ -56,7 +56,7 @@ class LocalStore:
         try:
             return await asyncio.to_thread(self.path(key).read_bytes)
         except FileNotFoundError as error:
-            raise AppError("artifact_missing", "附件内容不存在", 404) from error
+            raise AppError(Code.ARTIFACT_MISSING, "附件内容不存在", 404) from error
 
     async def delete(self, key: str) -> None:
         """重复删除可安全执行。"""
@@ -72,7 +72,7 @@ class S3Store:
         from botocore.config import Config
 
         if not config.bucket:
-            raise AppError("storage_not_configured", "S3 bucket 未配置", 503)
+            raise AppError(Code.STORAGE_NOT_CONFIGURED, "S3 bucket 未配置", 503)
         self.bucket = config.bucket
         self.client = boto3.client(
             "s3",

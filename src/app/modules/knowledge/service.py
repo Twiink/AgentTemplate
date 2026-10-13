@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from sqlalchemy import delete, select
 
-from app.core.errors import AppError
+from app.core.errors import AppError, Code
 from app.core.telemetry import retrieval
 from app.db.models import now
 from app.db.repository import attributes, owned, serialize
@@ -80,7 +80,7 @@ class KnowledgeService:
     ):
         """验证归属并记录导入及 outbox；重复内容和配置返回已有导入结果。"""
         if overlap < 0 or overlap >= chunk_size or chunk_size > 10000:
-            raise AppError("chunk_configuration", "切分参数无效")
+            raise AppError(Code.CHUNK_CONFIGURATION, "切分参数无效")
         async with self.db.transaction(principal) as session:
             kb = (
                 await session.scalars(
@@ -95,7 +95,7 @@ class KnowledgeService:
                 )
             ).one_or_none()
             if kb is None or artifact is None:
-                raise AppError("resource_not_found", "知识库或附件不存在", 404)
+                raise AppError(Code.RESOURCE_NOT_FOUND, "知识库或附件不存在", 404)
             building = (
                 await session.scalars(
                     select(KnowledgeIndex).where(
@@ -104,7 +104,7 @@ class KnowledgeService:
                 )
             ).first()
             if building:
-                raise AppError("knowledge_rebuilding", "索引重建期间不能修改文档", 409)
+                raise AppError(Code.KNOWLEDGE_REBUILDING, "索引重建期间不能修改文档", 409)
             config = {"chunk_size": chunk_size, "overlap": overlap, "sha256": artifact.sha256}
             jobs = (
                 await session.scalars(
@@ -148,7 +148,7 @@ class KnowledgeService:
                 )
             ).one_or_none()
             if job is None:
-                raise AppError("resource_not_found", "导入任务不存在", 404)
+                raise AppError(Code.RESOURCE_NOT_FOUND, "导入任务不存在", 404)
             if action == "cancel":
                 job.cancel_requested = True
                 if job.status == "queued":
@@ -157,7 +157,7 @@ class KnowledgeService:
                 job.status, job.cancel_requested, job.error = "queued", False, None
                 session.add(Outbox(**attributes(principal), task="knowledge", resource_id=job.id))
             else:
-                raise AppError("import_conflict", "导入状态或操作不允许", 409)
+                raise AppError(Code.IMPORT_CONFLICT, "导入状态或操作不允许", 409)
             return serialize(job)
 
     async def artifact_in_use(self, session, artifact_id: str) -> bool:
@@ -201,9 +201,9 @@ class KnowledgeService:
                 for index, page in enumerate(document.pages)
             ]
             if not any(str(p["content"]).strip() for p in pages):
-                raise AppError("ocr_required", "扫描 PDF 需要配置 OCR 解析器")
+                raise AppError(Code.OCR_REQUIRED, "扫描 PDF 需要配置 OCR 解析器")
             return pages
-        raise AppError("document_format", "文档格式不支持")
+        raise AppError(Code.DOCUMENT_FORMAT, "文档格式不支持")
 
     def split(self, pages, size: int, overlap: int):
         """按页面保留定位并使用重叠字符窗口；空白片段不进入向量库。"""
@@ -211,13 +211,13 @@ class KnowledgeService:
         for page in pages:
             content = page["content"]
             if not isinstance(content, str):
-                raise AppError("document_parser", "解析器必须返回文本内容")
+                raise AppError(Code.DOCUMENT_PARSER, "解析器必须返回文本内容")
             for start in range(0, len(content), size - overlap):
                 segment = content[start : start + size].strip()
                 if segment:
                     chunks.append({"content": segment, "page": page["page"], "offset": start})
         if not chunks:
-            raise AppError("document_empty", "文档没有可索引文本")
+            raise AppError(Code.DOCUMENT_EMPTY, "文档没有可索引文本")
         return chunks
 
     async def ingest(self, job_id: str):
@@ -247,7 +247,7 @@ class KnowledgeService:
         heartbeat = asyncio.create_task(self.renew(job_id, token, execution))
         try:
             if self.embedding_profile(profile["name"]) != profile:
-                raise AppError("embedding_profile_changed", "Embedding 配置改变，需要先重建索引")
+                raise AppError(Code.EMBEDDING_PROFILE_CHANGED, "Embedding 配置改变，需要先重建索引")
             artifact, data = await self.resources.artifacts.download(principal, artifact_id)
             pages = await asyncio.to_thread(self.parse, artifact["filename"], data)
             chunks = self.split(pages, config["chunk_size"], config["overlap"])
@@ -256,7 +256,7 @@ class KnowledgeService:
                 async with self.db.transaction(principal) as session:
                     job = await session.get(ImportJob, job_id)
                     if job.lease_token != token:
-                        raise AppError("lease_lost", "导入租约已失效", 409)
+                        raise AppError(Code.LEASE_LOST, "导入租约已失效", 409)
                     if job.cancel_requested:
                         job.status = "cancelled"
                         return
@@ -278,7 +278,7 @@ class KnowledgeService:
                     )
                 ).one()
                 if job.lease_token != token:
-                    raise AppError("lease_lost", "导入租约已失效", 409)
+                    raise AppError(Code.LEASE_LOST, "导入租约已失效", 409)
                 if job.cancel_requested:
                     job.status = "cancelled"
                     return
@@ -401,7 +401,7 @@ class KnowledgeService:
                 )
             ).one_or_none()
             if kb is None:
-                raise AppError("resource_not_found", "知识库不存在", 404)
+                raise AppError(Code.RESOURCE_NOT_FOUND, "知识库不存在", 404)
             busy = (
                 await session.scalars(
                     select(ImportJob).where(
@@ -417,7 +417,7 @@ class KnowledgeService:
                 )
             ).first()
             if busy or building:
-                raise AppError("knowledge_busy", "知识库有导入或重建任务", 409)
+                raise AppError(Code.KNOWLEDGE_BUSY, "知识库有导入或重建任务", 409)
             index = KnowledgeIndex(**attributes(principal), knowledge_id=kb.id, profile=profile)
             session.add(index)
             await session.flush()
@@ -467,11 +467,11 @@ class KnowledgeService:
                     )
                 ).one_or_none()
                 if kb is None:
-                    raise AppError("resource_not_found", "知识库不存在", 404)
+                    raise AppError(Code.RESOURCE_NOT_FOUND, "知识库不存在", 404)
                 index = await session.get(KnowledgeIndex, kb.active_index)
                 profile, index_id = index.profile, index.id
             if self.embedding_profile(profile["name"]) != profile:
-                raise AppError("embedding_profile_changed", "Embedding 配置改变，需要重建索引")
+                raise AppError(Code.EMBEDDING_PROFILE_CHANGED, "Embedding 配置改变，需要重建索引")
             vector = (await self.resources.models.embed(profile["name"], [query]))[0]
             from pgvector.sqlalchemy import HALFVEC, Vector
             from sqlalchemy import cast
@@ -515,7 +515,7 @@ class KnowledgeService:
                 ]
             if rerank:
                 if self.reranker is None:
-                    raise AppError("reranker_not_configured", "重排器未注册", 503)
+                    raise AppError(Code.RERANKER_NOT_CONFIGURED, "重排器未注册", 503)
                 results = await self.reranker(query, results)
             return results[:top_k]
 
@@ -528,7 +528,7 @@ class KnowledgeService:
                 )
             ).one_or_none()
             if document is None:
-                raise AppError("resource_not_found", "文档不存在", 404)
+                raise AppError(Code.RESOURCE_NOT_FOUND, "文档不存在", 404)
             await session.execute(
                 select(KnowledgeBase)
                 .where(KnowledgeBase.id == document.knowledge_id)
@@ -552,7 +552,7 @@ class KnowledgeService:
                 )
             ).first()
             if active or building:
-                raise AppError("knowledge_busy", "导入或重建期间不能删除文档", 409)
+                raise AppError(Code.KNOWLEDGE_BUSY, "导入或重建期间不能删除文档", 409)
             await session.execute(
                 delete(ImportJob).where(
                     ImportJob.knowledge_id == document.knowledge_id, ImportJob.name == document.name
@@ -571,7 +571,7 @@ class KnowledgeService:
                 )
             ).one_or_none()
             if kb is None:
-                raise AppError("resource_not_found", "知识库不存在", 404)
+                raise AppError(Code.RESOURCE_NOT_FOUND, "知识库不存在", 404)
             active = (
                 await session.scalars(
                     select(ImportJob).where(
@@ -580,8 +580,136 @@ class KnowledgeService:
                 )
             ).first()
             if active:
-                raise AppError("knowledge_busy", "知识库存在活动导入", 409)
+                raise AppError(Code.KNOWLEDGE_BUSY, "知识库存在活动导入", 409)
             await session.delete(kb)
+
+    async def keyword_search(
+        self, principal, knowledge_id: str, query: str, top_k=5, metadata=None
+    ):
+        """使用 pg_trgm 进行关键词相似度检索；返回格式与向量检索一致。"""
+        from sqlalchemy import func, text
+
+        async with self.db.transaction(principal) as session:
+            kb = (
+                await session.scalars(
+                    select(KnowledgeBase).where(
+                        KnowledgeBase.id == knowledge_id, *owned(KnowledgeBase, principal)
+                    )
+                )
+            ).one_or_none()
+            if kb is None:
+                raise AppError(Code.RESOURCE_NOT_FOUND, "知识库不存在", 404)
+            index_id = kb.active_index
+
+            # pg_trgm 相似度：1 - similarity 得到距离（0 最相似）
+            similarity = func.similarity(Chunk.content, query).label("similarity")
+            distance = (1 - similarity).label("distance")
+
+            stmt = select(Chunk, distance).where(
+                Chunk.index_id == index_id,
+                Chunk.content.op("%")(query),  # pg_trgm 相似度过滤
+                *owned(Chunk, principal),
+            )
+            if metadata:
+                stmt = stmt.where(Chunk.metadata_.contains(metadata))
+
+            # 设置 pg_trgm.similarity_threshold
+            await session.execute(text("SET LOCAL pg_trgm.similarity_threshold = 0.1"))
+
+            rows = await session.execute(stmt.order_by(distance).limit(top_k))
+
+            return [
+                {
+                    "content": chunk.content,
+                    "distance": float(score),
+                    "document_id": chunk.document_id,
+                    "version": chunk.version,
+                    "position": chunk.position,
+                    "page": chunk.page,
+                    "metadata": chunk.metadata_,
+                }
+                for chunk, score in rows.all()
+            ]
+
+    def rrf_fuse(self, vector_results: list, keyword_results: list, k=60) -> list:
+        """RRF (Reciprocal Rank Fusion) 融合向量和关键词检索结果。
+
+        RRF 公式: score = sum(1 / (k + rank_i))
+        k 通常取 60，rank 从 1 开始。
+        """
+        # 构建结果到排名的映射
+        vector_ranks = {
+            (r["document_id"], r["position"]): idx + 1 for idx, r in enumerate(vector_results)
+        }
+        keyword_ranks = {
+            (r["document_id"], r["position"]): idx + 1 for idx, r in enumerate(keyword_results)
+        }
+
+        # 收集所有唯一结果
+        all_keys = set(vector_ranks.keys()) | set(keyword_ranks.keys())
+
+        # 计算 RRF 分数
+        scores = {}
+        result_map = {}
+
+        for key in all_keys:
+            score = 0.0
+            if key in vector_ranks:
+                score += 1.0 / (k + vector_ranks[key])
+                result_map[key] = next(
+                    r for r in vector_results if (r["document_id"], r["position"]) == key
+                )
+            if key in keyword_ranks:
+                score += 1.0 / (k + keyword_ranks[key])
+                if key not in result_map:
+                    result_map[key] = next(
+                        r for r in keyword_results if (r["document_id"], r["position"]) == key
+                    )
+
+            scores[key] = score
+
+        # 按 RRF 分数排序
+        sorted_keys = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+
+        # 返回融合后的结果，添加 rrf_score
+        fused = []
+        for key, rrf_score in sorted_keys:
+            result = result_map[key].copy()
+            result["rrf_score"] = rrf_score
+            fused.append(result)
+
+        return fused
+
+    async def hybrid_search(
+        self,
+        principal,
+        knowledge_id: str,
+        query: str,
+        top_k=5,
+        metadata=None,
+        rerank=False,
+        rrf_k=60,
+    ):
+        """混合检索：向量 + 关键词，使用 RRF 融合。"""
+        with retrieval.time():
+            # 并发执行向量和关键词检索，各取 top_k * 2
+            vector_task = self.search(
+                principal, knowledge_id, query, top_k * 2, metadata, rerank=False
+            )
+            keyword_task = self.keyword_search(principal, knowledge_id, query, top_k * 2, metadata)
+
+            vector_results, keyword_results = await asyncio.gather(vector_task, keyword_task)
+
+            # RRF 融合
+            fused = self.rrf_fuse(vector_results, keyword_results, k=rrf_k)
+
+            # 应用 rerank
+            if rerank:
+                if self.reranker is None:
+                    raise AppError(Code.RERANKER_NOT_CONFIGURED, "重排器未注册", 503)
+                fused = await self.reranker(query, fused)
+
+            return fused[:top_k]
 
     def langchain_retriever(self, principal, knowledge_id: str, top_k=5):
         """构造原生 BaseRetriever；LangGraph 可直接注入服务或此对象。"""
@@ -594,7 +722,7 @@ class KnowledgeService:
             """受身份约束的知识检索器，只开放异步网络路径。"""
 
             def _get_relevant_documents(self, query, *, run_manager):
-                raise AppError("async_required", "检索必须使用异步接口")
+                raise AppError(Code.ASYNC_REQUIRED, "检索必须使用异步接口")
 
             async def _aget_relevant_documents(self, query, *, run_manager):
                 rows = await service.search(principal, knowledge_id, query, top_k)

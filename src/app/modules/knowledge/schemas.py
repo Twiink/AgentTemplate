@@ -31,6 +31,8 @@ class SearchInput(BaseModel):
     top_k: int = Field(default=5, ge=1, le=50)
     metadata: dict[str, Any] = Field(default_factory=dict)
     rerank: bool = False
+    search_mode: str = Field(default="vector", pattern="^(vector|keyword|hybrid)$")
+    rrf_k: int = Field(default=60, ge=1, le=100)
 
 
 class RebuildInput(BaseModel):
@@ -94,3 +96,4 @@ class SearchHit(BaseModel):
     position: int
     page: int | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    rrf_score: float | None = None
