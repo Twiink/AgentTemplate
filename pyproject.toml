@@ -13,7 +13,7 @@ dependencies = [
   "pyjwt[crypto]>=2.15,<3", "typer>=0.24,<1",
   "langchain[mcp]>=1.4,<2", "langgraph>=1.2,<2", "langgraph-checkpoint-postgres>=3.1,<4",
   "langchain-openai>=1,<2", "langchain-anthropic>=1,<2", "langchain-google-genai>=4,<5",
-  "mcp>=2.3,<3",
+  "mcp>=2.3,<3", "httpx2>=2.10,<3",
   # langchain 的 mcp extra 声明了 fastmcp，但 extras 在锁定时未被解析进来；
   # langchain.mcp.MCPAdapter 在导入时依赖它，因此显式声明并锁定版本。
   "fastmcp>=4.0.1,<5",
@@ -23,10 +23,10 @@ dependencies = [
   "opentelemetry-instrumentation-sqlalchemy>=0.60b0,<1",
   "opentelemetry-instrumentation-redis>=0.60b0,<1",
   "opentelemetry-instrumentation-celery>=0.60b0,<1",
-  "openinference-instrumentation-langchain>=0.2,<1",
+  "openinference-instrumentation-langchain>=0.1.79,<1",
   "sentry-sdk[fastapi]>=2.0,<3",
   "langsmith>=0.14,<1",
-  "trafilatura>=1.13,<2",
+  "trafilatura>=2,<3",
 ]
 
 # minimal 只安装核心依赖；full 安装全部模块依赖：uv sync --extra full。
