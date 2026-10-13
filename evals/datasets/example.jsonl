@@ -1,0 +1,3 @@
+{"id": "case-1", "agent_id": "assistant", "input": {"messages": [{"role": "user", "content": "什么是 Python？"}]}, "expected": "Python"}
+{"id": "case-2", "agent_id": "assistant", "input": {"messages": [{"role": "user", "content": "1+1等于几？"}]}, "expected": "2"}
+{"id": "case-3", "agent_id": "assistant", "input": {"messages": [{"role": "user", "content": "列出三种编程语言"}]}, "expected": ["Python", "JavaScript", "Java"]}
