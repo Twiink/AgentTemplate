@@ -1,16 +1,23 @@
 """API Key 管理命令：创建、列举和吊销密钥。"""
 
+from __future__ import annotations
+
+import asyncio
 import hashlib
 import secrets
 from datetime import UTC, datetime, timedelta
+from typing import Annotated
 
-import click
+import typer
 from sqlalchemy import select
 
 from app.cli.app import cli
-from app.cli.common import async_command
+from app.cli.common import ensure_ready, settings_or_exit
 from app.core.container import Container
 from app.db.models import ApiKey
+
+api_key_cli = typer.Typer(help="API Key 管理：创建、列举和吊销密钥。", no_args_is_help=True)
+cli.add_typer(api_key_cli, name="api-key")
 
 
 def generate_key() -> str:
@@ -19,124 +26,135 @@ def generate_key() -> str:
 
 
 def hash_key(key: str) -> str:
-    """计算密钥的 SHA-256 摘要。"""
+    """计算 API Key 的 SHA-256 摘要。"""
     return hashlib.sha256(key.encode()).hexdigest()
 
 
-@cli.group("api-key")
-def api_key_group():
-    """API Key 管理：创建、列举和吊销密钥。"""
-    pass
-
-
-@api_key_group.command("create")
-@click.option("--name", required=True, help="密钥名称")
-@click.option("--tenant-id", required=True, help="租户 ID")
-@click.option("--subject-id", required=True, help="主体 ID")
-@click.option(
-    "--scope",
-    "scopes",
-    multiple=True,
-    default=["resources:read", "resources:write"],
-    help="权限作用域，可多次指定",
-)
-@click.option("--expires-days", type=int, help="过期天数，不指定则永不过期")
-@async_command
-async def create_key(
-    name: str, tenant_id: str, subject_id: str, scopes: tuple, expires_days: int | None
-):
+@api_key_cli.command("create")
+def create_key(
+    name: Annotated[str, typer.Option(..., "--name", help="密钥名称")],
+    tenant_id: Annotated[str, typer.Option(..., "--tenant-id", help="租户 ID")],
+    subject_id: Annotated[str, typer.Option(..., "--subject-id", help="主体 ID")],
+    scopes: Annotated[
+        list[str] | None,
+        typer.Option("--scope", help="权限作用域，可多次指定；默认包含读写资源权限"),
+    ] = None,
+    expires_days: Annotated[
+        int | None, typer.Option("--expires-days", help="过期天数，不指定则永不过期")
+    ] = None,
+) -> None:
     """创建新的 API Key。"""
-    key = generate_key()
-    digest = hash_key(key)
-    expires_at = None
-    if expires_days:
-        expires_at = datetime.now(UTC) + timedelta(days=expires_days)
+    settings = settings_or_exit()
+    ensure_ready(settings)
 
-    async with Container.startup() as container:
-        async with container.db.transaction(system=True) as session:
-            api_key = ApiKey(
-                tenant_id=tenant_id,
-                subject_id=subject_id,
-                name=name,
-                digest=digest,
-                scopes=list(scopes),
-                revoked=False,
-                expires_at=expires_at,
-            )
-            session.add(api_key)
+    async def run() -> None:
+        key = generate_key()
+        digest = hash_key(key)
+        selected_scopes = scopes or ["resources:read", "resources:write"]
+        expires_at = datetime.now(UTC) + timedelta(days=expires_days) if expires_days else None
 
-        click.echo("\n创建成功")
-        click.echo(f"密钥 ID: {api_key.id}")
-        click.echo(f"名称: {name}")
-        click.echo(f"租户: {tenant_id}")
-        click.echo(f"主体: {subject_id}")
-        click.echo(f"作用域: {', '.join(scopes)}")
+        async with Container(settings) as container:
+            async with container.db.transaction(system=True) as session:
+                api_key = ApiKey(
+                    tenant_id=tenant_id,
+                    subject_id=subject_id,
+                    name=name,
+                    digest=digest,
+                    scopes=selected_scopes,
+                    revoked=False,
+                    expires_at=expires_at,
+                )
+                session.add(api_key)
+
+        typer.echo("\n创建成功")
+        typer.echo(f"密钥 ID: {api_key.id}")
+        typer.echo(f"名称: {name}")
+        typer.echo(f"租户: {tenant_id}")
+        typer.echo(f"主体: {subject_id}")
+        typer.echo(f"作用域: {', '.join(selected_scopes)}")
         if expires_at:
-            click.echo(f"过期时间: {expires_at.isoformat()}")
-        click.echo("\n请保存以下密钥，它只显示一次：")
-        click.echo(f"\n{key}\n")
+            typer.echo(f"过期时间: {expires_at.isoformat()}")
+        typer.echo("\n请保存以下密钥，它只显示一次：")
+        typer.echo(f"\n{key}\n")
+
+    asyncio.run(run())
 
 
-@api_key_group.command("list")
-@click.option("--tenant-id", help="按租户 ID 过滤")
-@click.option("--subject-id", help="按主体 ID 过滤")
-@click.option("--include-revoked", is_flag=True, help="包含已吊销的密钥")
-@async_command
-async def list_keys(tenant_id: str | None, subject_id: str | None, include_revoked: bool):
+@api_key_cli.command("list")
+def list_keys(
+    tenant_id: Annotated[str | None, typer.Option("--tenant-id", help="按租户 ID 过滤")] = None,
+    subject_id: Annotated[str | None, typer.Option("--subject-id", help="按主体 ID 过滤")] = None,
+    include_revoked: Annotated[
+        bool, typer.Option("--include-revoked", help="包含已吊销的密钥")
+    ] = False,
+) -> None:
     """列举 API Keys。"""
-    async with Container.startup() as container:
-        async with container.db.transaction(system=True) as session:
-            query = select(ApiKey)
-            if tenant_id:
-                query = query.where(ApiKey.tenant_id == tenant_id)
-            if subject_id:
-                query = query.where(ApiKey.subject_id == subject_id)
-            if not include_revoked:
-                query = query.where(ApiKey.revoked.is_(False))
+    settings = settings_or_exit()
+    ensure_ready(settings)
 
-            query = query.order_by(ApiKey.created_at.desc())
-            keys = (await session.scalars(query)).all()
+    async def run() -> list[ApiKey]:
+        async with Container(settings) as container:
+            async with container.db.transaction(system=True) as session:
+                query = select(ApiKey)
+                if tenant_id:
+                    query = query.where(ApiKey.tenant_id == tenant_id)
+                if subject_id:
+                    query = query.where(ApiKey.subject_id == subject_id)
+                if not include_revoked:
+                    query = query.where(ApiKey.revoked.is_(False))
 
-        if not keys:
-            click.echo("未找到 API Keys")
-            return
+                query = query.order_by(ApiKey.created_at.desc())
+                return list((await session.scalars(query)).all())
 
-        click.echo(f"\n共找到 {len(keys)} 个密钥：\n")
-        for key in keys:
-            status = "已吊销" if key.revoked else "有效"
-            if key.expires_at and key.expires_at < datetime.now(UTC):
-                status = "已过期"
+    keys = asyncio.run(run())
+    if not keys:
+        typer.echo("未找到 API Keys")
+        return
 
-            click.echo(f"ID: {key.id}")
-            click.echo(f"  名称: {key.name}")
-            click.echo(f"  租户: {key.tenant_id}")
-            click.echo(f"  主体: {key.subject_id}")
-            click.echo(f"  作用域: {', '.join(key.scopes)}")
-            click.echo(f"  状态: {status}")
-            click.echo(f"  创建时间: {key.created_at.isoformat()}")
-            if key.last_used_at:
-                click.echo(f"  最近使用: {key.last_used_at.isoformat()}")
-            if key.expires_at:
-                click.echo(f"  过期时间: {key.expires_at.isoformat()}")
-            click.echo()
+    typer.echo(f"\n共找到 {len(keys)} 个密钥：\n")
+    for api_key in keys:
+        status = "已吊销" if api_key.revoked else "有效"
+        if api_key.expires_at and api_key.expires_at < datetime.now(UTC):
+            status = "已过期"
+
+        typer.echo(f"ID: {api_key.id}")
+        typer.echo(f"  名称: {api_key.name}")
+        typer.echo(f"  租户: {api_key.tenant_id}")
+        typer.echo(f"  主体: {api_key.subject_id}")
+        typer.echo(f"  作用域: {', '.join(api_key.scopes)}")
+        typer.echo(f"  状态: {status}")
+        typer.echo(f"  创建时间: {api_key.created_at.isoformat()}")
+        if api_key.last_used_at:
+            typer.echo(f"  最近使用: {api_key.last_used_at.isoformat()}")
+        if api_key.expires_at:
+            typer.echo(f"  过期时间: {api_key.expires_at.isoformat()}")
+        typer.echo()
 
 
-@api_key_group.command("revoke")
-@click.argument("key_id")
-@async_command
-async def revoke_key(key_id: str):
+@api_key_cli.command("revoke")
+def revoke_key(
+    key_id: Annotated[str, typer.Argument(..., help="需要吊销的密钥 ID")],
+) -> None:
     """吊销指定的 API Key。"""
-    async with Container.startup() as container:
-        async with container.db.transaction(system=True) as session:
-            key = await session.get(ApiKey, key_id)
-            if not key:
-                click.echo(f"未找到密钥: {key_id}", err=True)
-                raise SystemExit(1)
+    settings = settings_or_exit()
+    ensure_ready(settings)
 
-            if key.revoked:
-                click.echo(f"密钥已经被吊销: {key.name}")
-                return
+    async def run() -> tuple[str, bool, bool]:
+        async with Container(settings) as container:
+            async with container.db.transaction(system=True) as session:
+                api_key = await session.get(ApiKey, key_id)
+                if api_key is None:
+                    return "", False, False
+                if api_key.revoked:
+                    return api_key.name, True, True
+                api_key.revoked = True
+                return api_key.name, True, False
 
-            key.revoked = True
-
-        click.echo(f"已吊销密钥: {key.name} ({key_id})")
+    name, found, already_revoked = asyncio.run(run())
+    if not found:
+        typer.echo(f"未找到密钥: {key_id}", err=True)
+        raise typer.Exit(1)
+    if already_revoked:
+        typer.echo(f"密钥已经被吊销: {name}")
+        return
+    typer.echo(f"已吊销密钥: {name} ({key_id})")
