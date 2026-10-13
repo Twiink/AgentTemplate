@@ -9,7 +9,7 @@ from typing import Any
 
 from pydantic import Field, create_model
 
-from app.core.errors import AppError
+from app.core.errors import AppError, Code
 from app.tools.registry import ToolDefinition
 
 
@@ -22,7 +22,7 @@ class MCPConnection:
     async def call_tool(self, name, arguments):
         """提交一次真实协议调用并等待结果；连接失败不会伪装为空工具结果。"""
         if self.task.done():
-            raise AppError("mcp_disconnected", "MCP 连接已关闭", 503)
+            raise AppError(Code.MCP_DISCONNECTED, "MCP 连接已关闭", 503)
         result = asyncio.get_running_loop().create_future()
         await self.queue.put((name, arguments, result))
         return await result
@@ -39,7 +39,7 @@ class MCPManager:
     async def connect(self, name: str):
         """惰性启动真实连接；发现完成才返回，参数和秘密引用缺失时准确诊断。"""
         if name not in self.resources.settings.mcp:
-            raise AppError("mcp_not_configured", "MCP 服务未配置", 503)
+            raise AppError(Code.MCP_NOT_CONFIGURED, "MCP 服务未配置", 503)
         async with self.lock:
             if name in self.connections:
                 return self.connections[name][0]
@@ -62,7 +62,7 @@ class MCPManager:
         values = {}
         for key, ref in refs.items():
             if ref not in os.environ:
-                raise AppError("mcp_credential_missing", "MCP 凭据引用不存在", 503)
+                raise AppError(Code.MCP_CREDENTIAL_MISSING, "MCP 凭据引用不存在", 503)
             values[key] = os.environ[ref]
         return values
 
@@ -75,7 +75,7 @@ class MCPManager:
 
                 if config.transport == "stdio":
                     if not config.command:
-                        raise AppError("mcp_configuration", "stdio command 未配置", 503)
+                        raise AppError(Code.MCP_CONFIGURATION, "stdio command 未配置", 503)
                     from mcp.client.stdio import stdio_client
 
                     read, write = await stack.enter_async_context(
@@ -89,12 +89,12 @@ class MCPManager:
                     )
                 else:
                     if not config.url:
-                        raise AppError("mcp_configuration", "HTTP URL 未配置", 503)
-                    import httpx2
+                        raise AppError(Code.MCP_CONFIGURATION, "HTTP URL 未配置", 503)
+                    import httpx
                     from mcp.client.streamable_http import streamable_http_client
 
                     client = await stack.enter_async_context(
-                        httpx2.AsyncClient(
+                        httpx.AsyncClient(
                             headers=self.resolve(config.header_refs), timeout=30, trust_env=False
                         )
                     )
@@ -126,15 +126,6 @@ class MCPManager:
                     )
                     original_schema = dict(tool.input_schema)
                     schema = dict(original_schema)
-                    if write_tool:
-                        schema = {
-                            **schema,
-                            "properties": {
-                                **schema.get("properties", {}),
-                                "operation_id": {"type": "string", "minLength": 1},
-                            },
-                            "required": [*schema.get("required", []), "operation_id"],
-                        }
                     model = self.schema(schema, f"MCP_{name}_{tool.name}")
 
                     def factory(remote_name, json_schema):
@@ -144,12 +135,11 @@ class MCPManager:
                             """校验完整协议约束后通过专门任务调用工具。"""
                             import jsonschema
 
-                            arguments.pop("operation_id", None)
                             jsonschema.validate(arguments, json_schema)
                             connection = self.connections[name][0]
                             response = await connection.call_tool(remote_name, arguments)
                             if response.is_error:
-                                raise AppError("mcp_tool_error", "MCP 工具返回错误", 502)
+                                raise AppError(Code.MCP_TOOL_ERROR, "MCP 工具返回错误", 502)
                             return response.model_dump(mode="json")
 
                         return call
@@ -187,7 +177,7 @@ class MCPManager:
             while not queue.empty():
                 request = queue.get_nowait()
                 if request and not request[2].done():
-                    request[2].set_exception(AppError("mcp_disconnected", "MCP 连接已关闭", 503))
+                    request[2].set_exception(AppError(Code.MCP_DISCONNECTED, "MCP 连接已关闭", 503))
             if isinstance(error, asyncio.CancelledError):
                 raise
 

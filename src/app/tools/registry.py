@@ -12,16 +12,17 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
+from time import monotonic
 from typing import Any
 
 from pydantic import BaseModel
 from sqlalchemy import select
 
-from app.core.errors import AppError
-from app.core.telemetry import tools
+from app.core.errors import AppError, Code
+from app.core.telemetry import tool_calls_total, tool_duration_seconds
 from app.db.models import ToolCall
 from app.runtime.contracts import current_run
-from app.tools.builtin import files, http, search, sql
+from app.tools.builtin import files, http, search, sql, time
 
 
 @dataclass(frozen=True)
@@ -76,7 +77,7 @@ class ToolRegistry:
         self.register(
             ToolDefinition(
                 "http_fetch",
-                "获取允许域名的网页正文",
+                "获取允许域名的网页正文并提取为 Markdown",
                 http.FetchURL,
                 partial(http.fetch, self.config),
                 "tools:http",
@@ -100,6 +101,33 @@ class ToolRegistry:
                 "tools:sql",
             )
         )
+        self.register(
+            ToolDefinition(
+                "current_time",
+                "获取指定时区的当前时间",
+                time.CurrentTimeParams,
+                time.current_time,
+                "tools:time",
+            )
+        )
+        self.register(
+            ToolDefinition(
+                "format_time",
+                "格式化 Unix 时间戳为指定格式",
+                time.FormatTimeParams,
+                time.format_time,
+                "tools:time",
+            )
+        )
+        self.register(
+            ToolDefinition(
+                "parse_time",
+                "解析时间字符串为 Unix 时间戳",
+                time.ParseTimeParams,
+                time.parse_time,
+                "tools:time",
+            )
+        )
 
     def register(self, definition: ToolDefinition) -> None:
         """注册真实实现；重复名称直接失败。"""
@@ -110,11 +138,11 @@ class ToolRegistry:
     async def execute(self, name: str, arguments: dict[str, Any], *, call_id: str | None = None):
         """执行已绑定工具；副作用先记录为 executing，崩溃后保留 unknown，不盲目重放。"""
         if name not in self.items:
-            raise AppError("tool_not_found", "工具未注册", 404)
+            raise AppError(Code.TOOL_NOT_FOUND, "工具未注册", 404)
         definition = self.items[name]
         context = current_run.get()
         if not context:
-            raise AppError("run_context_required", "工具必须在可信运行上下文中调用", 403)
+            raise AppError(Code.RUN_CONTEXT_REQUIRED, "工具必须在可信运行上下文中调用", 403)
         context.principal.require(definition.scope)
         values = definition.schema.model_validate(arguments).model_dump(
             exclude_unset=definition.omit_unset
@@ -122,10 +150,8 @@ class ToolRegistry:
         digest = hashlib.sha256(
             json.dumps(values, sort_keys=True, default=str).encode()
         ).hexdigest()
-        stable_id = call_id or values.get("operation_id") or digest
+        stable_id = call_id or digest
         if definition.write:
-            if call_id is None and not values.get("operation_id"):
-                raise AppError("operation_id_required", "写工具需要稳定 operation_id")
             decision = (
                 context.approvals.get(stable_id)
                 if self.config.confirm_writes
@@ -159,7 +185,7 @@ class ToolRegistry:
                         }
                     )
             if not isinstance(decision, dict) or decision.get("approved") is not True:
-                raise AppError("tool_approval_denied", "工具操作未获批准", 403)
+                raise AppError(Code.TOOL_APPROVAL_DENIED, "工具操作未获批准", 403)
             async with self.resources.db.transaction(context.principal) as session:
                 row = (
                     await session.execute(
@@ -170,10 +196,10 @@ class ToolRegistry:
                 ).scalar_one_or_none()
                 if row:
                     if row.arguments_hash != digest or row.tool != name:
-                        raise AppError("idempotency_conflict", "调用 ID 已用于其他参数", 409)
+                        raise AppError(Code.IDEMPOTENCY_CONFLICT, "调用 ID 已用于其他参数", 409)
                     if row.status == "succeeded":
                         return {"ok": True, "result": row.result}
-                    raise AppError("tool_outcome_unknown", "先前副作用结果不确定，需要核对", 409)
+                    raise AppError(Code.TOOL_OUTCOME_UNKNOWN, "先前副作用结果不确定，需要核对", 409)
                 session.add(
                     ToolCall(
                         tenant_id=context.principal.tenant_id,
@@ -186,6 +212,7 @@ class ToolRegistry:
                     )
                 )
         try:
+            started = monotonic()
             async with self.limit, asyncio.timeout(self.config.timeout_seconds):
                 with self.resources.telemetry.tracer.start_as_current_span(
                     "工具调用", attributes={"tool.name": name}
@@ -207,11 +234,13 @@ class ToolRegistry:
                         )
                     ).scalar_one()
                     row.status, row.result = "succeeded", result
-            tools.labels(name, "success").inc()
+            elapsed = monotonic() - started
+            tool_calls_total.labels(name, "success").inc()
+            tool_duration_seconds.labels(name).observe(elapsed)
             self.resources.logger.info("工具执行完成", tool=name, run_id=context.run_id)
             return {"ok": True, "result": result}
         except BaseException:
-            tools.labels(name, "error").inc()
+            tool_calls_total.labels(name, "error").inc()
             if definition.write:
                 async with self.resources.db.transaction(context.principal) as session:
                     row = (
@@ -231,7 +260,7 @@ class ToolRegistry:
         output = []
         for name in names:
             if name not in self.items:
-                raise AppError("tool_not_found", "工具未注册", 404)
+                raise AppError(Code.TOOL_NOT_FOUND, "工具未注册", 404)
             definition = self.items[name]
 
             def factory(tool_name):

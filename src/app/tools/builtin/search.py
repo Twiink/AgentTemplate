@@ -6,7 +6,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 from app.core.config import ToolConfig
-from app.core.errors import AppError
+from app.core.errors import AppError, Code
 
 
 class SearchWeb(BaseModel):
@@ -19,7 +19,7 @@ class SearchWeb(BaseModel):
 async def web_search(config: ToolConfig, http: httpx.AsyncClient, query: str, limit: int):
     """调用真实 Tavily HTTP API；未配置密钥时准确诊断。"""
     if not config.tavily_key:
-        raise AppError("search_not_configured", "Tavily 未配置", 503)
+        raise AppError(Code.SEARCH_NOT_CONFIGURED, "Tavily 未配置")
     response = await http.post(
         "https://api.tavily.com/search",
         headers={"Authorization": "Bearer " + config.tavily_key.get_secret_value()},

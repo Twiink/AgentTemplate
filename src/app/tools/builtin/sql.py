@@ -10,7 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.core.config import ToolConfig
-from app.core.errors import AppError
+from app.core.errors import AppError, Code
 from app.runtime.contracts import current_run
 
 
@@ -24,16 +24,16 @@ class ReadSQL(BaseModel):
 async def sql_read(config: ToolConfig, query: str, parameters: dict[str, Any]):
     """通过只读事务与非特权只读角色执行单条查询；超时和返回数量均受限制。"""
     if not config.readonly_database_url:
-        raise AppError("sql_not_configured", "专用只读连接未配置", 503)
+        raise AppError(Code.SQL_NOT_CONFIGURED, "专用只读连接未配置", 503)
     if ";" in query or not query.lstrip().lower().startswith(("select ", "with ")):
-        raise AppError("sql_denied", "只接受单条查询", 403)
+        raise AppError(Code.SQL_DENIED, "只接受单条查询", 403)
     import re
 
     dangerous = re.compile(
         r"(?i)\b(set_config|pg_sleep|dblink|lo_import|lo_export|pg_read_file|pg_write_file|pg_advisory|nextval|setval|pg_terminate_backend|pg_cancel_backend)\w*\s*\("
     )
     if dangerous.search(query):
-        raise AppError("sql_denied", "查询包含受限函数", 403)
+        raise AppError(Code.SQL_DENIED, "查询包含受限函数", 403)
     import sqlglot
     from sqlglot import exp
 
@@ -46,7 +46,7 @@ async def sql_read(config: ToolConfig, query: str, parameters: dict[str, Any]):
         for table in parsed.find_all(exp.Table):
             name = ".".join(part for part in [table.catalog, table.db, table.name] if part).lower()
             if name not in ctes and name not in {v.lower() for v in config.sql_allowed_tables}:
-                raise AppError("sql_table_denied", "查询表不在只读允许列表", 403)
+                raise AppError(Code.SQL_TABLE_DENIED, "查询表不在只读允许列表", 403)
         functions = {
             "COUNT",
             "SUM",
@@ -83,14 +83,14 @@ async def sql_read(config: ToolConfig, query: str, parameters: dict[str, Any]):
                 else function.sql_name()
             )
             if name not in functions:
-                raise AppError("sql_function_denied", "查询函数不在允许列表", 403)
+                raise AppError(Code.SQL_FUNCTION_DENIED, "查询函数不在允许列表", 403)
     except AppError:
         raise
     except Exception as error:
-        raise AppError("sql_denied", "查询无法安全解析", 403) from error
+        raise AppError(Code.SQL_DENIED, "查询无法安全解析", 403) from error
     context = current_run.get()
     if context is None:
-        raise AppError("run_context_required", "SQL 查询需要可信运行身份", 403)
+        raise AppError(Code.RUN_CONTEXT_REQUIRED, "SQL 查询需要可信运行身份", 403)
     engine = create_async_engine(config.readonly_database_url.get_secret_value())
     try:
         async with engine.connect() as connection, connection.begin():
@@ -112,7 +112,7 @@ async def sql_read(config: ToolConfig, query: str, parameters: dict[str, Any]):
                 )
             ).one()
             if role.rolsuper or role.rolbypassrls:
-                raise AppError("sql_role_denied", "只读工具不允许特权数据库角色", 403)
+                raise AppError(Code.SQL_ROLE_DENIED, "只读工具不允许特权数据库角色", 403)
             result = await connection.stream(text(query), parameters)
             rows = []
             async for row in result.mappings():
