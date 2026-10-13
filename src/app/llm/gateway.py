@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any
+from typing import Any, cast
 
 from langchain.chat_models import init_chat_model
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -227,8 +227,10 @@ class ModelGateway:
                     span.record_exception(error)
                     raise
 
-        model.ainvoke = tracked_ainvoke
-        model.astream = tracked_astream
+        # LangChain 的模型接口由实例动态包装；setattr 保留原方法描述符的运行时调用方式。
+        instrumented_model = cast(Any, model)
+        instrumented_model.ainvoke = tracked_ainvoke
+        instrumented_model.astream = tracked_astream
         return model
 
     def http_for(self, profile):

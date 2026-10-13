@@ -17,6 +17,7 @@ async def setup(container: Container) -> None:
     from app.modules.memory.service import MemoryService
 
     container.memories = MemoryService(container)
+    await container.memories.initialize()
     if container.background is None:
         # 没有后台任务时无法执行提取，也没有定时清理；检索时会过滤已过期的记忆。
         return

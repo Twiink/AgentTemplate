@@ -50,6 +50,7 @@ tool_duration_seconds = Histogram("agent_tool_duration_seconds", "工具调用�
 runs_total = Counter("agent_runs_total", "运行状态统计", ["agent", "status"])
 run_duration_seconds = Histogram("agent_run_duration_seconds", "运行耗时", ["agent", "status"])
 run_queue_wait_seconds = Histogram("agent_run_queue_wait_seconds", "运行排队耗时")
+retrieval = Histogram("agent_retrieval_duration_seconds", "知识与记忆检索耗时")
 db_pool_connections = Gauge(
     "agent_db_pool_connections", "数据库连接池状态", ["state"], multiprocess_mode="livesum"
 )

@@ -2,10 +2,12 @@
 
 import time
 from contextlib import asynccontextmanager
+from typing import cast
 
 import structlog
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import QueuePool
 
 from app.core.config import Settings
 from app.core.security import Principal
@@ -75,6 +77,8 @@ class Database:
 
     def update_pool_metrics(self) -> None:
         """更新连接池指标；由周期采集调用。"""
-        pool = self.engine.pool
-        db_pool_connections.labels("in_use").set(pool.checkedout())
-        db_pool_connections.labels("idle").set(pool.size() - pool.checkedout())
+        # create_async_engine 默认使用 AsyncAdaptedQueuePool，它继承 QueuePool 的计数接口。
+        pool = cast(QueuePool, self.engine.sync_engine.pool)
+        checked_out = pool.checkedout()
+        db_pool_connections.labels("in_use").set(checked_out)
+        db_pool_connections.labels("idle").set(pool.size() - checked_out)

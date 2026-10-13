@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from contextlib import AbstractAsyncContextManager
 from datetime import timedelta
+from typing import TYPE_CHECKING, cast
 
 from sqlalchemy import delete, select, text
 
@@ -12,6 +14,9 @@ from app.db.models import now
 from app.db.repository import attributes, owned, serialize
 from app.modules.memory.models import Memory
 
+if TYPE_CHECKING:
+    from langgraph.store.postgres import AsyncPostgresStore
+
 
 class MemoryService:
     """长期记忆的增删查与语义检索；使用 LangGraph store 实现持久化。"""
@@ -19,16 +24,20 @@ class MemoryService:
     def __init__(self, resources):
         self.resources = resources
         self.db = resources.db
-        self.store = None
+        self.store: AsyncPostgresStore | None = None
         self._embedding_model = None
 
     async def initialize(self):
         """初始化 LangGraph AsyncPostgresStore。"""
         from langgraph.store.postgres import AsyncPostgresStore
 
-        # 使用与应用相同的数据库连接
-        conn_string = str(self.resources.settings.database_url)
-        self.store = AsyncPostgresStore(conn_string)
+        # Store 使用 Psycopg 自己的异步池；由容器退出栈统一关闭。
+        conn_string = self.resources.settings.database_url.get_secret_value()
+        store_context = cast(
+            AbstractAsyncContextManager[AsyncPostgresStore],
+            AsyncPostgresStore.from_conn_string(conn_string),
+        )
+        self.store = await self.resources.stack.enter_async_context(store_context)
         await self.store.setup()
 
     async def put(
@@ -124,7 +133,7 @@ class MemoryService:
     ):
         """语义检索：使用 embedding 向量相似度查找相关记忆。"""
         if not self._embedding_model:
-            raise AppError(Code.FEATURE_UNAVAILABLE, "语义检索需要配置 embedding 模型", 503)
+            raise AppError(Code.EMBEDDING_CONFIGURATION, "语义检索需要配置 embedding 模型", 503)
 
         with retrieval.time():
             # 生成查询向量

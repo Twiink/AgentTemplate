@@ -123,7 +123,7 @@ async def search_knowledge(
     elif search_mode == "hybrid":
         results = await knowledge.hybrid_search(principal, knowledge_id, **params)
     else:
-        raise AppError(Code.INVALID_PARAMETER, "search_mode 必须是 vector/keyword/hybrid")
+        raise AppError(Code.VALIDATION_ERROR, "search_mode 必须是 vector/keyword/hybrid")
 
     return {"items": results}
 

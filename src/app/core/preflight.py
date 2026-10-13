@@ -393,11 +393,11 @@ async def check_llm_reachability(settings: Settings) -> list[CheckResult]:
     checked_endpoints = set()
 
     for _alias, profile in models.items():
-        # 跳过没有 base_url 的配置
-        if not profile.base_url:
+        # 仅探测显式配置的端点；使用服务商默认地址的模型由客户端初始化检查。
+        if not profile.endpoint:
             continue
 
-        endpoint = str(profile.base_url)
+        endpoint = profile.endpoint
         if endpoint in checked_endpoints:
             continue
 

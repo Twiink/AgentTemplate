@@ -90,11 +90,11 @@ class MCPManager:
                 else:
                     if not config.url:
                         raise AppError(Code.MCP_CONFIGURATION, "HTTP URL 未配置", 503)
-                    import httpx
+                    import httpx2
                     from mcp.client.streamable_http import streamable_http_client
 
                     client = await stack.enter_async_context(
-                        httpx.AsyncClient(
+                        httpx2.AsyncClient(
                             headers=self.resolve(config.header_refs), timeout=30, trust_env=False
                         )
                     )
