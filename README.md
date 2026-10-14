@@ -38,7 +38,18 @@ uv run agent-template worker
 uv run agent-template scheduler
 ```
 
-`init` 创建 `config/private.yaml`、`.data/developer.key` 和 `.data/compose.env`，使用随机开发凭据及仅当前用户可读的文件权限。重复执行保留已有配置。加 `--prune` 会删除未启用模块的代码、迁移和用不到的部署文件，删除前列出路径并确认。数据库端口为 5433，Redis 端口为 6380。模型缺省时诊断为未配置；不会调用收费模型做健康检查。
+`init` 创建 `config/private.yaml`、`.data/developer.key` 和 `.data/compose.env`，使用随机开发凭据及仅当前用户可读的文件权限。重复执行保留已有配置。加 `--prune` 会删除未启用模块的代码、迁移和 Worker/Kubernetes 文件，删除前列出路径并确认；共享观测部署文件保留。数据库端口为 5433，Redis 端口为 6380。模型缺省时诊断为未配置；不会调用收费模型做健康检查。
+
+新项目可使用项目显示名和独立的数据标识初始化，并按需生成业务骨架：
+
+```bash
+uv run agent-template init --preset minimal --project-name my-assistant
+uv run agent-template scaffold agent assistant --model openai-main
+uv run agent-template scaffold prompt assistant review
+uv run agent-template scaffold tool assistant normalize_text
+```
+
+脚手架文件已存在时命令拒绝覆盖。生成 Agent 需要在配置中声明模型别名；新增专用工具后，在 Agent `build()` 中导入其 `definition` 并传给 `ctx.tools.langchain(..., custom=[definition])`。
 
 API、Worker 和 scheduler 启动前自动执行启动预检，检查配置、模块、目录、数据库连接与角色、迁移版本、行级安全和 Redis；存在失败的阻断项时拒绝启动，并逐项输出修复建议。`agent-template preflight` 可单独执行同样的检查，`doctor` 在此基础上再检查 Agent、MCP 与各模块状态。
 
@@ -73,50 +84,51 @@ API 文档位于 `/docs`。资源接口使用 `/api/v1`，必须携带 `Authoriz
 ```python
 # src/app/agents/assistant/agent.py
 from langchain.agents import create_agent
-from app.agents.registry import AgentSpec
+from app.agents.registry import AgentSpec, BuildContext
 
-async def build(ctx):
-    model = await ctx.models.chat("gpt-4o")
-    tools = ctx.tools.langchain(["read_file", "write_file", "http_fetch"])
-    prompt = ctx.prompts.render("assistant/system.md", {"role": "助手"})
-    
+def build(ctx: BuildContext):
+    model = ctx.models.chat("openai-main")
+    tools = ctx.tools.langchain(["file_read", "file_write", "http_fetch"])
+    system_prompt, _, _ = ctx.prompts.render("assistant/system.md", {"role": "助手"})
     return create_agent(
         model=model,
         tools=tools,
-        system_message=prompt[0],
+        system_prompt=system_prompt,
         checkpointer=ctx.checkpointer,
-        store=ctx.store,  # 启用 memory 模块时可用
+        store=ctx.store,
     )
 
 spec = AgentSpec(
     id="assistant",
-    description="通用助手，可读写文件和访问网页",
+    description="可读取工作区文件并访问允许的网页",
     build=build,
 )
 ```
+
+`ctx.models.chat()` 是同步构建接口；Prompt `render()` 返回正文、版本和元数据。只有启用 `memory` 模块时 `ctx.store` 才非空。Agent 绑定工具不会替代每个主体的权限校验。
 
 使用 LangGraph 编写复杂流程：
 
 ```python
 # src/app/agents/reviewer/agent.py
+from typing import Annotated, TypedDict
+from langchain_core.messages import BaseMessage
 from langgraph.graph import StateGraph, START, END
-from app.agents.registry import AgentSpec
+from langgraph.graph.message import add_messages
+from app.agents.registry import AgentSpec, BuildContext
 
-async def build(ctx):
-    model = await ctx.models.chat("claude-3-5-sonnet")
-    
-    class State(TypedDict):
-        messages: Annotated[list, add_messages]
-        documents: list[str]
-        score: int
-    
-    graph = StateGraph(State)
-    graph.add_node("analyze", lambda s: analyze(s, model))
-    graph.add_node("review", lambda s: review(s, model))
-    graph.add_edge(START, "analyze")
-    graph.add_edge("analyze", "review")
+class ReviewState(TypedDict):
+    messages: Annotated[list[BaseMessage], add_messages]
+
+def build(ctx: BuildContext):
+    model = ctx.models.chat("openai-main")
+    async def review(state: ReviewState):
+        response = await model.ainvoke(state["messages"])
+        return {"messages": [response]}
+    graph = StateGraph(ReviewState)
+    graph.add_node("review", review)
+    graph.add_edge(START, "review")
     graph.add_edge("review", END)
-    
     return graph.compile(checkpointer=ctx.checkpointer)
 
 spec = AgentSpec(
@@ -125,6 +137,9 @@ spec = AgentSpec(
     build=build,
 )
 ```
+
+这里的 `build` 只装配图；模型调用发生在图节点执行期间。
+
 
 ### 调用 API 示例
 
@@ -197,11 +212,11 @@ llm:
     gpt-4o:
       provider: openai
       model: gpt-4o-2024-08-06
-      api_key: ${OPENAI_API_KEY}
+      api_key: REPLACE_WITH_OPENAI_API_KEY
     claude-3-5-sonnet:
       provider: anthropic
       model: claude-3-5-sonnet-20241022
-      api_key: ${ANTHROPIC_API_KEY}
+      api_key: REPLACE_WITH_ANTHROPIC_API_KEY
   embeddings:
     text-embedding-3-small:
       provider: openai
@@ -222,44 +237,44 @@ auth:
 
 tools:
   directory: .data/workspace
-  http_allowed_domains: [example.com, api.openai.com]
-  sql_readonly_url: ${READONLY_DATABASE_URL}
+  allowed_hosts: [example.com, api.openai.com]
+  readonly_database_url: REPLACE_WITH_READ_ONLY_DATABASE_URL
   sql_allowed_tables: [users, orders]
 
 mcp:
   filesystem:
+    transport: stdio
     command: npx
     args: [-y, "@modelcontextprotocol/server-filesystem", /allowed/path]
     allowed_tools: [read_file, write_file]
+    write_tools: [write_file]
 ```
+
+YAML 配置不执行 `${VAR}` 插值。示例中的 `REPLACE_WITH_...` 仅为占位符；实际秘密请放在未提交的 `config/private.yaml` 或通过 `AGENT_*` 环境变量注入。
 
 ### 开启观测
 
-LLM 链路追踪（发往 Langfuse 或 LangSmith）：
+LLM 链路追踪通过 OTLP HTTP 导出到已配置的 Collector：
 
 ```yaml
 # config/production.yaml
 tracing:
   enabled: true
-  endpoint: https://cloud.langfuse.com
+  endpoint: http://localhost:4318/v1/traces
   headers:
-    Authorization: Bearer ${LANGFUSE_SECRET_KEY}
-  sample_rate: 0.1
+    Authorization: Bearer REPLACE_WITH_COLLECTOR_TOKEN
   capture_content: false  # 生产环境建议关闭正文采集
-  redaction_patterns: [sk-[a-zA-Z0-9]+]
-
-# 或使用 LangSmith
-langsmith:
-  enabled: true
-  api_key: ${LANGSMITH_API_KEY}
-  project: production
+redaction_patterns: ['sk-[A-Za-z0-9]+']
 ```
+
+如需接 Langfuse 或 LangSmith，使用其 OTLP 兼容入口，并按服务要求配置 endpoint 与 headers。环境变量也不会在 YAML 字符串中展开。
 
 错误追踪（Sentry）：
 
 ```yaml
 sentry:
-  dsn: ${SENTRY_DSN}
+  enabled: true
+  dsn: REPLACE_WITH_SENTRY_DSN
   environment: production
   traces_sample_rate: 0.01
 ```
@@ -270,7 +285,7 @@ Prometheus 指标已内置在 `/metrics`；Grafana 面板和告警规则在 `dep
 
 - **前端界面与调试 UI**：API 优先，界面由项目自行决定。
 - **示例 Agent 代码**：注册表默认为空，用法见上方代码片段。
-- **测试代码**：测试由派生项目在开发阶段自行添加；模板用启动预检保证配置和依赖正确。
+- **业务测试和端到端测试**：模板只包含不依赖外部服务的契约测试；派生项目应为自身业务补充测试。
 - **多 Agent 编排封装**：直接使用 LangGraph 原生写法。
 - **OCR、GraphRAG、计费系统、管理后台**：按需扩展。
 
@@ -301,7 +316,7 @@ uv run agent-template check
 uv run agent-template preflight
 ```
 
-`check` 执行格式、lint、类型与规范检查；类型检查需要安装 full 的依赖（`uv sync --extra full`），或先用 `init --prune` 删除未启用的模块。模板不包含测试代码，测试由派生项目在开发阶段按需添加；模板通过启动预检和冒烟检查确认配置正确、依赖可用。验收步骤见 [验收清单](docs/验收标准.md)。
+`check` 执行模板契约测试、格式、lint、类型与规范检查；类型检查需要安装 full 的依赖（`uv sync --extra full`），或先用 `init --prune` 删除未启用的模块。模板契约测试使用假模型与替身资源，不要求外部服务；派生项目仍需为业务逻辑补充测试。验收步骤见 [验收清单](docs/验收标准.md)。
 
 注释及 docstring 使用中文，公共接口说明用途、边界和副作用，复杂逻辑解释设计理由。项目文本及命令输出禁止 Emoji，规则详见 [AGENTS.md](AGENTS.md)。
 

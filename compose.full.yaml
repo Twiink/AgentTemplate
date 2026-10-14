@@ -8,8 +8,8 @@ services:
     - agent-template
     - worker
     environment:
-      AGENT_DATABASE_URL: postgresql+asyncpg://agent_app:${AGENT_DB_PASSWORD}@postgres:5432/agenttemplate
-      AGENT_MIGRATION_DATABASE_URL: postgresql+asyncpg://agent_owner:${AGENT_DB_PASSWORD}@postgres:5432/agenttemplate
+      AGENT_DATABASE_URL: postgresql+asyncpg://agent_app:${AGENT_DB_PASSWORD}@postgres:5432/${AGENT_DB_NAME:-agenttemplate}
+      AGENT_MIGRATION_DATABASE_URL: postgresql+asyncpg://agent_owner:${AGENT_DB_PASSWORD}@postgres:5432/${AGENT_DB_NAME:-agenttemplate}
       AGENT_REDIS_URL: redis://redis:6379/0
       PROMETHEUS_MULTIPROC_DIR: /opt/app/.data/worker-metrics
     volumes:
@@ -27,8 +27,8 @@ services:
     - agent-template
     - scheduler
     environment:
-      AGENT_DATABASE_URL: postgresql+asyncpg://agent_app:${AGENT_DB_PASSWORD}@postgres:5432/agenttemplate
-      AGENT_MIGRATION_DATABASE_URL: postgresql+asyncpg://agent_owner:${AGENT_DB_PASSWORD}@postgres:5432/agenttemplate
+      AGENT_DATABASE_URL: postgresql+asyncpg://agent_app:${AGENT_DB_PASSWORD}@postgres:5432/${AGENT_DB_NAME:-agenttemplate}
+      AGENT_MIGRATION_DATABASE_URL: postgresql+asyncpg://agent_owner:${AGENT_DB_PASSWORD}@postgres:5432/${AGENT_DB_NAME:-agenttemplate}
       AGENT_REDIS_URL: redis://redis:6379/0
     volumes:
     - ./config/private.yaml:/opt/app/config/private.yaml:ro

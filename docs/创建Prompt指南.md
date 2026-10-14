@@ -43,17 +43,17 @@ prompts/
 
 ```python
 # src/app/agents/assistant/agent.py
-async def build(ctx: BuildContext):
+def build(ctx: BuildContext):
     # 加载 Prompt（无参数）
-    system_prompt, version = ctx.prompts.render("assistant/system.md", {})
+    system_prompt, version, metadata = ctx.prompts.render("assistant/system.md", {})
     
-    model = await ctx.models.chat("gpt-4o")
-    tools = ctx.tools.langchain(["read_file"])
+    model = ctx.models.chat("openai-main")
+    tools = ctx.tools.langchain(["file_read"])
     
     return create_agent(
         model=model,
         tools=tools,
-        system_message=system_prompt,
+        system_prompt=system_prompt,
         checkpointer=ctx.checkpointer,
     )
 ```
@@ -148,7 +148,7 @@ print(f"建议温度: {metadata.temperature}")
 # 根据元数据选择模型
 if metadata.recommended_models:
     model_alias = metadata.recommended_models[0]
-    model = await ctx.models.chat(model_alias)
+    model = ctx.models.chat(model_alias)
 ```
 
 ## 复杂 Prompt

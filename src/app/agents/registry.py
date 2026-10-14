@@ -38,6 +38,8 @@ class AgentSpec:
     input_schema: type[BaseModel] | None = None
     # 在模板运行上下文之外追加的字段；身份字段由服务端写入，不接受这里的覆盖。
     context_schema: type | None = None
+    # 启动构建前需连接的 MCP 服务；只连接该 Agent 声明使用的服务。
+    mcp_servers: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -50,7 +52,6 @@ class BuildContext:
     prompts: PromptLoader
     checkpointer: Any
     store: Any = None
-    middleware: Any = None
 
 
 @dataclass

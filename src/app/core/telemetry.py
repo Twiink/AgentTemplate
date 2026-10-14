@@ -1,6 +1,7 @@
 """单一 OpenTelemetry 导出与低基数指标；正文采集只在显式脱敏配置后开放。"""
 
 import atexit
+import logging
 import os
 import threading
 
@@ -23,6 +24,7 @@ if os.getenv("PROMETHEUS_MULTIPROC_DIR"):
 _providers = {}
 _provider_lock = threading.Lock()
 _instrumented = set()
+_instrumentation_failures = {}
 _instrumentation_lock = threading.Lock()
 
 http_requests_total = Counter(
@@ -70,8 +72,9 @@ def instrument_libraries():
     pid = os.getpid()
     with _instrumentation_lock:
         if pid in _instrumented:
-            return
+            return _instrumentation_failures.get(pid, ())
         _instrumented.add(pid)
+    failures = []
 
     # FastAPI 自动插桩由 main.py 中的 FastAPIInstrumentor 处理
 
@@ -80,46 +83,69 @@ def instrument_libraries():
         from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 
         HTTPXClientInstrumentor().instrument()
-    except Exception:
-        pass
+    except Exception as error:
+        failures.append("httpx")
+        logging.getLogger("agent.telemetry").warning(
+            "OpenTelemetry 自动插桩初始化失败",
+            extra={"component": "httpx", "exception_type": type(error).__name__},
+        )
 
     # SQLAlchemy 插桩：数据库查询
     try:
         from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
 
         SQLAlchemyInstrumentor().instrument()
-    except Exception:
-        pass
+    except Exception as error:
+        failures.append("sqlalchemy")
+        logging.getLogger("agent.telemetry").warning(
+            "OpenTelemetry 自动插桩初始化失败",
+            extra={"component": "sqlalchemy", "exception_type": type(error).__name__},
+        )
 
     # Redis 插桩：缓存与队列
     try:
         from opentelemetry.instrumentation.redis import RedisInstrumentor
 
         RedisInstrumentor().instrument()
-    except Exception:
-        pass
+    except Exception as error:
+        failures.append("redis")
+        logging.getLogger("agent.telemetry").warning(
+            "OpenTelemetry 自动插桩初始化失败",
+            extra={"component": "redis", "exception_type": type(error).__name__},
+        )
 
     # Celery 插桩：后台任务
     try:
         from opentelemetry.instrumentation.celery import CeleryInstrumentor
 
         CeleryInstrumentor().instrument()
-    except Exception:
-        pass
+    except Exception as error:
+        failures.append("celery")
+        logging.getLogger("agent.telemetry").warning(
+            "OpenTelemetry 自动插桩初始化失败",
+            extra={"component": "celery", "exception_type": type(error).__name__},
+        )
 
     # LangChain 插桩：Agent 执行链路
     try:
         from openinference.instrumentation.langchain import LangChainInstrumentor
 
         LangChainInstrumentor().instrument()
-    except Exception:
-        pass
+    except Exception as error:
+        failures.append("langchain")
+        logging.getLogger("agent.telemetry").warning(
+            "OpenTelemetry 自动插桩初始化失败",
+            extra={"component": "langchain", "exception_type": type(error).__name__},
+        )
+    with _instrumentation_lock:
+        _instrumentation_failures[pid] = tuple(failures)
+    return tuple(failures)
 
 
 def init_sentry(settings: Settings):
-    """初始化 Sentry 错误追踪；开发环境默认关闭，按需启用。"""
+    """初始化 Sentry 并返回 disabled、initialized 或 failed 状态。"""
     if not settings.sentry.enabled or not settings.sentry.dsn:
-        return
+        return "disabled"
 
     try:
         import sentry_sdk
@@ -145,9 +171,13 @@ def init_sentry(settings: Settings):
                 SqlalchemyIntegration(),
             ],
         )
-    except Exception:
-        # Sentry 初始化失败不应阻止应用启动
-        pass
+        return "initialized"
+    except Exception as error:
+        logging.getLogger("agent.telemetry").warning(
+            "Sentry 初始化失败，应用继续启动",
+            extra={"exception_type": type(error).__name__},
+        )
+        return "failed"
 
 
 class Telemetry:
@@ -157,38 +187,52 @@ class Telemetry:
         self.config = settings.tracing
         self.redactor = Redactor(settings.redaction_patterns)
         self.provider = None
+        self.instrumentation_failures = ()
+        self.tracing_status = "disabled"
 
         # 初始化 Sentry 错误追踪
-        init_sentry(settings)
+        self.sentry_status = init_sentry(settings)
 
         if self.config.enabled:
             # 启用追踪时同时启用自动插桩
-            instrument_libraries()
+            self.instrumentation_failures = instrument_libraries()
 
-            # Celery 任务不断创建资源容器，provider 必须按进程复用，不能每次任务关闭全局 provider。
-            identity = (os.getpid(), settings.app_name, self.config.endpoint)
-            with _provider_lock:
-                if identity not in _providers:
-                    provider = TracerProvider(
-                        resource=Resource.create(
-                            {
-                                "service.name": settings.app_name,
-                                "deployment.environment.name": settings.environment,
-                            }
+            try:
+                # Celery 任务不断创建资源容器，provider 必须按进程复用，不能每次任务关闭全局 provider。
+                identity = (os.getpid(), settings.app_name, self.config.endpoint)
+                with _provider_lock:
+                    if identity not in _providers:
+                        provider = TracerProvider(
+                            resource=Resource.create(
+                                {
+                                    "service.name": settings.app_name,
+                                    "deployment.environment.name": settings.environment,
+                                }
+                            )
                         )
-                    )
-                    exporter = OTLPSpanExporter(
-                        endpoint=self.config.endpoint,
-                        headers={k: v.get_secret_value() for k, v in self.config.headers.items()},
-                        timeout=5,
-                    )
-                    provider.add_span_processor(BatchSpanProcessor(exporter))
-                    _providers[identity] = provider
-                    if len([key for key in _providers if key[0] == os.getpid()]) == 1:
-                        trace.set_tracer_provider(provider)
-                    atexit.register(provider.shutdown)
-                self.provider = _providers[identity]
-            self.tracer = self.provider.get_tracer("agent-template")
+                        exporter = OTLPSpanExporter(
+                            endpoint=self.config.endpoint,
+                            headers={
+                                k: v.get_secret_value() for k, v in self.config.headers.items()
+                            },
+                            timeout=5,
+                        )
+                        provider.add_span_processor(BatchSpanProcessor(exporter))
+                        _providers[identity] = provider
+                        if len([key for key in _providers if key[0] == os.getpid()]) == 1:
+                            trace.set_tracer_provider(provider)
+                        atexit.register(provider.shutdown)
+                    self.provider = _providers[identity]
+                self.tracer = self.provider.get_tracer("agent-template")
+                self.tracing_status = "degraded" if self.instrumentation_failures else "initialized"
+            except Exception as error:
+                logging.getLogger("agent.telemetry").warning(
+                    "OpenTelemetry 初始化失败，应用继续启动",
+                    extra={"exception_type": type(error).__name__},
+                )
+                self.provider = None
+                self.tracer = trace.NoOpTracerProvider().get_tracer("agent-template")
+                self.tracing_status = "failed"
         else:
             self.tracer = trace.NoOpTracerProvider().get_tracer("agent-template")
 

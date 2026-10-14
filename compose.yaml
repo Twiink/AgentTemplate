@@ -1,12 +1,12 @@
 # 基础服务：两档共用。启动：docker compose --env-file .data/compose.env up -d
 # 镜像依赖由 .data/compose.env 中的 AGENT_EXTRAS 决定，init 按预设写入。
-name: agent-template
+name: ${COMPOSE_PROJECT_NAME:-agent-template}
 services:
   postgres:
     image: pgvector/pgvector:pg18
     environment:
       POSTGRES_USER: agent_owner
-      POSTGRES_DB: agenttemplate
+      POSTGRES_DB: ${AGENT_DB_NAME:-agenttemplate}
       POSTGRES_PASSWORD: ${AGENT_DB_PASSWORD:?请先执行 agent-template init}
     ports:
     - 127.0.0.1:5433:5432
@@ -16,7 +16,7 @@ services:
     healthcheck:
       test:
       - CMD-SHELL
-      - pg_isready -U agent_owner -d agenttemplate
+      - pg_isready -U agent_owner -d ${AGENT_DB_NAME:-agenttemplate}
       interval: 5s
       timeout: 3s
       retries: 30
@@ -48,8 +48,8 @@ services:
     - agent-template
     - migrate
     environment:
-      AGENT_DATABASE_URL: postgresql+asyncpg://agent_app:${AGENT_DB_PASSWORD}@postgres:5432/agenttemplate
-      AGENT_MIGRATION_DATABASE_URL: postgresql+asyncpg://agent_owner:${AGENT_DB_PASSWORD}@postgres:5432/agenttemplate
+      AGENT_DATABASE_URL: postgresql+asyncpg://agent_app:${AGENT_DB_PASSWORD}@postgres:5432/${AGENT_DB_NAME:-agenttemplate}
+      AGENT_MIGRATION_DATABASE_URL: postgresql+asyncpg://agent_owner:${AGENT_DB_PASSWORD}@postgres:5432/${AGENT_DB_NAME:-agenttemplate}
       AGENT_REDIS_URL: redis://redis:6379/0
     volumes:
     - ./config/private.yaml:/opt/app/config/private.yaml:ro
@@ -68,8 +68,8 @@ services:
         EXTRAS: ${AGENT_EXTRAS-full}
     user: ${UID:-1000}:${GID:-1000}
     environment:
-      AGENT_DATABASE_URL: postgresql+asyncpg://agent_app:${AGENT_DB_PASSWORD}@postgres:5432/agenttemplate
-      AGENT_MIGRATION_DATABASE_URL: postgresql+asyncpg://agent_owner:${AGENT_DB_PASSWORD}@postgres:5432/agenttemplate
+      AGENT_DATABASE_URL: postgresql+asyncpg://agent_app:${AGENT_DB_PASSWORD}@postgres:5432/${AGENT_DB_NAME:-agenttemplate}
+      AGENT_MIGRATION_DATABASE_URL: postgresql+asyncpg://agent_owner:${AGENT_DB_PASSWORD}@postgres:5432/${AGENT_DB_NAME:-agenttemplate}
       AGENT_REDIS_URL: redis://redis:6379/0
     volumes:
     - ./config/private.yaml:/opt/app/config/private.yaml:ro

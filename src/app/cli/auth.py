@@ -48,6 +48,7 @@ def create_key(
     ensure_ready(settings)
 
     async def run() -> None:
+        """创建凭据记录，并在数据库提交后一次性显示原始密钥。"""
         key = generate_key()
         digest = hash_key(key)
         selected_scopes = scopes or ["resources:read", "resources:write"]
@@ -93,6 +94,7 @@ def list_keys(
     ensure_ready(settings)
 
     async def run() -> list[ApiKey]:
+        """按筛选条件读取数据库中的密钥记录。"""
         async with Container(settings) as container:
             async with container.db.transaction(system=True) as session:
                 query = select(ApiKey)
@@ -140,6 +142,7 @@ def revoke_key(
     ensure_ready(settings)
 
     async def run() -> tuple[str, bool, bool]:
+        """锁定指定密钥并返回名称、是否存在及是否已吊销。"""
         async with Container(settings) as container:
             async with container.db.transaction(system=True) as session:
                 api_key = await session.get(ApiKey, key_id)

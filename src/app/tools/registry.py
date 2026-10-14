@@ -13,8 +13,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
 from time import monotonic
-from typing import Any
+from typing import Annotated, Any
 
+from langchain_core.tools import InjectedToolCallId
 from pydantic import BaseModel
 from sqlalchemy import select
 
@@ -23,6 +24,20 @@ from app.core.telemetry import tool_calls_total, tool_duration_seconds
 from app.db.models import ToolCall
 from app.runtime.contracts import current_run
 from app.tools.builtin import files, http, search, sql, time
+
+
+def _model_tool(function, schema):
+    """把接收 Pydantic 对象的异步内置函数适配为注册表关键字调用协议。"""
+
+    async def invoke(**values):
+        """按注册表关键字协议校验字段并调用原始参数模型工具。"""
+        params = schema.model_validate(values)
+        result = function(params)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
+    return invoke
 
 
 @dataclass(frozen=True)
@@ -106,7 +121,7 @@ class ToolRegistry:
                 "current_time",
                 "获取指定时区的当前时间",
                 time.CurrentTimeParams,
-                time.current_time,
+                _model_tool(time.current_time, time.CurrentTimeParams),
                 "tools:time",
             )
         )
@@ -115,7 +130,7 @@ class ToolRegistry:
                 "format_time",
                 "格式化 Unix 时间戳为指定格式",
                 time.FormatTimeParams,
-                time.format_time,
+                _model_tool(time.format_time, time.FormatTimeParams),
                 "tools:time",
             )
         )
@@ -124,7 +139,7 @@ class ToolRegistry:
                 "parse_time",
                 "解析时间字符串为 Unix 时间戳",
                 time.ParseTimeParams,
-                time.parse_time,
+                _model_tool(time.parse_time, time.ParseTimeParams),
                 "tools:time",
             )
         )
@@ -139,7 +154,13 @@ class ToolRegistry:
         """执行已绑定工具；副作用先记录为 executing，崩溃后保留 unknown，不盲目重放。"""
         if name not in self.items:
             raise AppError(Code.TOOL_NOT_FOUND, "工具未注册", 404)
-        definition = self.items[name]
+        return await self.execute_definition(self.items[name], arguments, call_id=call_id)
+
+    async def execute_definition(
+        self, definition: ToolDefinition, arguments: dict[str, Any], *, call_id: str | None = None
+    ):
+        """通过同一治理路径执行已注册或 Agent 专属的工具定义。"""
+        name = definition.name
         context = current_run.get()
         if not context:
             raise AppError(Code.RUN_CONTEXT_REQUIRED, "工具必须在可信运行上下文中调用", 403)
@@ -253,22 +274,35 @@ class ToolRegistry:
                     row.status = "unknown"
             raise
 
-    def langchain(self, names: list[str]):
-        """返回 LangChain 原生 StructuredTool，只绑定显式传入的工具。"""
+    def langchain(self, names: list[str], *, custom: list[ToolDefinition] | None = None):
+        """绑定注册工具和可选 Agent 专属工具，二者都经过相同治理流程。"""
         from langchain_core.tools import StructuredTool
 
         output = []
+        definitions = []
         for name in names:
             if name not in self.items:
                 raise AppError(Code.TOOL_NOT_FOUND, "工具未注册", 404)
-            definition = self.items[name]
+            definitions.append(self.items[name])
+        for definition in custom or []:
+            if definition.name in self.items:
+                raise ValueError(f"Agent 专属工具不能覆盖已注册名称：{definition.name}")
+        definitions.extend(custom or [])
+        names_seen = set()
+        for definition in definitions:
+            name = definition.name
+            if name in names_seen:
+                raise ValueError(f"工具绑定名称重复：{name}")
+            names_seen.add(name)
 
-            def factory(tool_name):
+            def factory(tool_definition):
                 """固定框架工具绑定名称，所有调用继续经过统一治理。"""
 
-                async def invoke(**kwargs):
+                async def invoke(tool_call_id: Annotated[str, InjectedToolCallId], **kwargs):
                     """把框架参数交给统一工具治理。"""
-                    return await self.execute(tool_name, kwargs)
+                    return await self.execute_definition(
+                        tool_definition, kwargs, call_id=tool_call_id
+                    )
 
                 return invoke
 
@@ -277,7 +311,7 @@ class ToolRegistry:
                     name=name,
                     description=definition.description,
                     args_schema=definition.schema,
-                    coroutine=factory(name),
+                    coroutine=factory(definition),
                 )
             )
         return output

@@ -20,21 +20,19 @@ from langchain.agents import create_agent
 from app.agents.registry import AgentSpec, BuildContext
 
 
-async def build(ctx: BuildContext):
+def build(ctx: BuildContext):
     """构建 Agent；只做装配，不发起网络调用。"""
-    # 获取模型
-    model = await ctx.models.chat("gpt-4o")
+    model = ctx.models.chat("openai-main")
     
-    # 获取工具
+    # 只绑定此 Agent 需要的工具；调用时仍校验主体权限。
     tools = ctx.tools.langchain([
-        "read_file",
-        "write_file",
+        "file_read",
+        "file_write",
         "http_fetch",
-        "tavily_search",
+        "web_search",
     ])
     
-    # 加载 Prompt
-    system_prompt, _ = ctx.prompts.render(
+    system_prompt, _, _ = ctx.prompts.render(
         "assistant/system.md",
         {"role": "助手", "capabilities": "文件读写、网页访问、搜索"}
     )
@@ -43,7 +41,7 @@ async def build(ctx: BuildContext):
     return create_agent(
         model=model,
         tools=tools,
-        system_message=system_prompt,
+        system_prompt=system_prompt,
         checkpointer=ctx.checkpointer,  # 必须使用
         store=ctx.store,  # 启用 memory 模块时可用
     )
@@ -144,8 +142,8 @@ curl -X POST http://localhost:8000/api/v1/threads/thread-123/runs/wait \
 """代码审查 Agent：分析、审查、生成报告。"""
 
 from typing import TypedDict, Annotated
-from langgraph.graph import StateGraph, START, END, add_messages
-from langgraph.prebuilt import ToolNode
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.message import add_messages
 from app.agents.registry import AgentSpec, BuildContext
 
 
@@ -157,25 +155,25 @@ class ReviewState(TypedDict):
     score: int
 
 
-async def build(ctx: BuildContext):
-    model = await ctx.models.chat("claude-3-5-sonnet")
-    tools = ctx.tools.langchain(["read_file"])
+def build(ctx: BuildContext):
+    model = ctx.models.chat("openai-main")
+    tools = ctx.tools.langchain(["file_read"])
     
     # 定义节点
     async def analyze(state: ReviewState):
         """分析代码，识别问题。"""
-        content = state["messages"][-1]["content"]
+        content = state["messages"][-1].content
         # 调用模型分析...
-        return {"issues": [...]}
+        return {"issues": []}
     
     async def review(state: ReviewState):
         """审查问题，评分。"""
         # 审查逻辑...
-        return {"score": 85}
+        return {"score": 0}
     
     async def report(state: ReviewState):
         """生成报告。"""
-        prompt, _ = ctx.prompts.render("reviewer/report.md", {
+        prompt, _, _ = ctx.prompts.render("reviewer/report.md", {
             "file": state["file_path"],
             "score": str(state["score"]),
             "count": str(len(state["issues"])),
@@ -266,33 +264,30 @@ spec = AgentSpec(
 ## 集成 MCP 工具
 
 ```python
-async def build(ctx: BuildContext):
-    model = await ctx.models.chat("gpt-4o")
-    
-    # 获取内置工具
-    builtin = ctx.tools.langchain(["read_file", "write_file"])
-    
-    # 获取 MCP 工具（如果配置了）
-    mcp_tools = []
-    if ctx.tools.mcp:
-        mcp_tools = ctx.tools.mcp.langchain(["github_create_issue"])
-    
-    all_tools = builtin + mcp_tools
-    
+def build(ctx: BuildContext):
     return create_agent(
-        model=model,
-        tools=all_tools,
-        system_message="...",
+        model=ctx.models.chat("openai-main"),
+        tools=ctx.tools.langchain(["file_read", "file_write", "mcp_github_create_issue"]),
+        system_prompt="...",
         checkpointer=ctx.checkpointer,
     )
+
+spec = AgentSpec(
+    id="issue-assistant",
+    description="使用工作区文件和 GitHub MCP 工具处理问题",
+    build=build,
+    mcp_servers=("github",),
+)
 ```
+
+声明在 `mcp_servers` 中的服务会在该 Agent 构建前连接；未声明的 MCP 服务不会因其他 Agent 启动而连接。发现到的工具名采用 `mcp_<服务名>_<远端工具名>`。
 
 ## 使用长期记忆
 
 ```python
-async def build(ctx: BuildContext):
-    model = await ctx.models.chat("gpt-4o")
-    tools = ctx.tools.langchain(["read_file"])
+def build(ctx: BuildContext):
+    model = ctx.models.chat("openai-main")
+    tools = ctx.tools.langchain(["file_read"])
     
     # store 在启用 memory 模块时可用
     if ctx.store is None:
@@ -301,7 +296,7 @@ async def build(ctx: BuildContext):
     return create_agent(
         model=model,
         tools=tools,
-        system_message="...",
+        system_prompt="...",
         checkpointer=ctx.checkpointer,
         store=ctx.store,  # 启用记忆
     )
@@ -312,22 +307,19 @@ async def build(ctx: BuildContext):
 使用预设中间件：
 
 ```python
-async def build(ctx: BuildContext):
-    model = await ctx.models.chat("gpt-4o")
-    tools = ctx.tools.langchain(["read_file", "write_file"])
-    
-    # 应用中间件（降级、重试、超时）
-    middleware_model = ctx.middleware.llm_resilience(model)
+def build(ctx: BuildContext):
+    model = ctx.models.chat("openai-main")
+    tools = ctx.tools.langchain(["file_read", "file_write"])
     
     return create_agent(
-        model=middleware_model,
+        model=model,
         tools=tools,
-        system_message="...",
+        system_prompt="...",
         checkpointer=ctx.checkpointer,
     )
 ```
 
-**注意**：工具已通过 `@governed_tool` 自动治理，无需手动包装。
+模型超时、预算与用量由模型网关统一处理；工具绑定通过 `ToolRegistry` 执行权限校验、审批和副作用账本。不要绕过注册表直接传入写工具。
 
 ## 只启用特定 Agent
 

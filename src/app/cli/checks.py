@@ -1,4 +1,4 @@
-"""检查命令：启动预检、详细诊断，以及格式、lint、类型与规范的静态检查。"""
+"""检查命令：启动预检、详细诊断，以及模板契约、格式、lint、类型与规范检查。"""
 
 from __future__ import annotations
 
@@ -51,10 +51,11 @@ def doctor():
 
 @cli.command()
 def check():
-    """执行格式、lint、类型与规范检查；任意一项失败返回非零。模板不包含测试代码。"""
+    """执行模板契约测试、格式、lint、类型与规范检查；任意一项失败返回非零。"""
     commands = [
-        ["uv", "run", "ruff", "format", "--check", "src", "scripts"],
-        ["uv", "run", "ruff", "check", "src", "scripts"],
+        ["uv", "run", "pytest", "-q"],
+        ["uv", "run", "ruff", "format", "--check", "src", "scripts", "tests"],
+        ["uv", "run", "ruff", "check", "src", "scripts", "tests"],
         ["uv", "run", "ty", "check", "src"],
         [sys.executable, "scripts/check_conventions.py"],
     ]

@@ -1,5 +1,6 @@
 # 公共非敏感配置。连接串和凭据放入 private.yaml 或 AGENT_* 环境变量。
 app_name: AgentTemplate
+preset: minimal
 run_timeout_seconds: 300
 run_token_budget: 64000
 recursion_limit: 25

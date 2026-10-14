@@ -135,16 +135,19 @@ class Container:
         self.threads = ThreadService(self)
         self.runs = RunService(self)
 
-        # 注册运行成功后的费用记录钩子
+        # 任一终态都记录费用，因为失败或取消前的模型请求仍可能产生费用。
         async def record_cost_hook(session, run):
+            """把运行累计费用记入主体月度配额。"""
             from app.core.security import Principal
 
             principal = Principal(run.tenant_id, run.subject_id, frozenset(run.scopes))
-            cost = run.usage.get("total_cost", 0)
+            cost = (run.usage.get("cost", run.usage.get("total_cost", 0)) or 0) + (
+                run.usage.get("estimated_cost") or 0
+            )
             if cost > 0:
-                await self.quota.record(principal, cost)
+                await self.quota.record(principal, cost, run_id=run.id)
 
-        self.runs.succeeded_hooks.append(record_cost_hook)
+        self.runs.terminal_hooks.append(record_cost_hook)
 
         # 模块按依赖顺序装配，后装配的模块可以向先装配的模块登记回调。
         for info in resolve(self.settings.modules):
@@ -165,17 +168,20 @@ class Container:
         from app.agents.registry import AgentRegistry, BuildContext
 
         self.agents = AgentRegistry(enabled=list(self.settings.agents.enabled))
-        if not self.agents.discover():
+        specs = self.agents.discover()
+        if not specs:
             self.agents.items = {}
             return
+        required_mcp = dict.fromkeys(server for spec in specs for server in spec.mcp_servers)
+        for server in required_mcp:
+            await self.mcp.connect(server)
         context = BuildContext(
             settings=self.settings,
             models=self.models,
             tools=self.tools,
             prompts=self.prompts,
             checkpointer=await self.checkpoint(),
-            store=None,
-            middleware=None,
+            store=self.memories.store if self.memories is not None else None,
         )
         await self.agents.build_all(context)
 

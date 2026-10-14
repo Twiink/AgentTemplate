@@ -51,7 +51,11 @@ build-backend = "uv_build"
 module-name = "app"
 
 [dependency-groups]
-dev = ["ruff>=0.16,<1", "ty>=0.0.85,<1"]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.16,<1",
+    "ty>=0.0.85,<1",
+]
 
 [tool.fastapi]
 entrypoint = "app.main:app"

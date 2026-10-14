@@ -42,6 +42,8 @@ class RunService:
         self.resources, self.db = resources, resources.db
         # 运行成功后在同一事务内执行的回调，例如记忆模块据此安排提取任务。
         self.succeeded_hooks: list[Callable[[Any, Run], Awaitable[Any]]] = []
+        # 运行进入任一终态时执行，例如记录失败或取消任务已经产生的模型费用。
+        self.terminal_hooks: list[Callable[[Any, Run], Awaitable[Any]]] = []
 
     async def append_event(self, session, run, kind, payload):
         """调用者必须已持有运行行锁；序号与事件同事务保存。"""
@@ -183,6 +185,9 @@ class RunService:
             await self.append_event(session, run, "status", {"status": status, "pending": pending})
             if status == "succeeded":
                 for hook in self.succeeded_hooks:
+                    await hook(session, run)
+            if status in TERMINAL:
+                for hook in self.terminal_hooks:
                     await hook(session, run)
 
     async def submit(self, principal, agent_id, thread_id, input, options=None, *, queued=True):
@@ -341,10 +346,14 @@ class RunService:
                 "input_tokens": None,
                 "output_tokens": None,
                 "estimated_tokens": 0,
+                "estimated_cost": 0.0,
+                "reserved_cost": 0.0,
                 "missing_usage_calls": 0,
                 "cost": None,
                 "calls": 0,
+                "reserved_tokens": 0,
             },
+            reserved_tokens=int((run.usage or {}).get("reserved_tokens", 0)),
         )
         if run.resume and "approvals" in run.resume:
             context.approvals = run.resume["approvals"]

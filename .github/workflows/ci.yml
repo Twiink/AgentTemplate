@@ -36,7 +36,7 @@ jobs:
           AGENT_DATABASE_URL: postgresql+asyncpg://agent_app:ci-only-password@localhost:5432/agenttemplate
           AGENT_MIGRATION_DATABASE_URL: postgresql+asyncpg://agent_owner:ci-only-password@localhost:5432/agenttemplate
         run: uv run agent-template migrate
-      # 模板不包含测试代码，以启动预检确认迁移结果、运行角色、行级安全与 Redis 连通。
+      # 启动预检确认迁移结果、运行角色、行级安全与 Redis 连通。
       - name: 启动预检
         env:
           AGENT_DATABASE_URL: postgresql+asyncpg://agent_app:ci-only-password@localhost:5432/agenttemplate

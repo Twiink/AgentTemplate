@@ -22,6 +22,8 @@ from app.core.telemetry import (
     llm_tokens_total,
 )
 from app.llm.pricing import PricingTable, load_pricing, require_price
+from app.llm.tokens import estimate_messages
+from app.runtime.contracts import current_run
 
 # 模板内的 provider 取值到 init_chat_model 原生 provider 的映射。
 # openai_compatible 复用 openai 客户端并通过 base_url 指向兼容端点，
@@ -119,9 +121,40 @@ class ModelGateway:
         original_ainvoke = model.ainvoke
         original_astream = model.astream
 
+        async def reserve_budget(input):
+            """预留预算并在网络调用前持久化；普通模型调用保持可独立使用。"""
+            context = current_run.get()
+            if context is None:
+                return None, 0, None, 0.0
+            messages = input.get("messages") if isinstance(input, dict) else input
+            if not isinstance(messages, (list, tuple)):
+                messages = [messages]
+            estimated = estimate_messages(messages)
+            price = self.price_for(profile)
+            if context.resources.settings.monthly_cost_budget is not None and price is None:
+                raise AppError(
+                    Code.PRICING_REQUIRED,
+                    "月度费用配额要求价格表收录每个实际使用的模型",
+                )
+            reserved_cost = context.reserve(estimated, profile.max_output_tokens, profile, price)
+            await context.resources.runs.persist_usage(context)
+            return context, estimated + profile.max_output_tokens, price, reserved_cost
+
+        async def record_budget(context, estimated, price, reserved_cost, usage):
+            """累计模型用量并立即持久化，使 Worker 恢复后继续使用同一预算。"""
+            if context is None:
+                return
+            try:
+                context.record_usage(usage, estimated, profile, price, reserved_cost)
+            finally:
+                await context.resources.runs.persist_usage(context)
+
         async def tracked_ainvoke(input, config=None, **kwargs):
+            """包装一次非流式调用，执行预算预留、用量持久化和请求追踪。"""
             provider = "openai" if profile.provider == "openai_compatible" else profile.provider
             started = time.monotonic()
+            run_context, estimated, price, reserved_cost = await reserve_budget(input)
+            usage_recorded = False
 
             # 创建 OTel span 并设置 GenAI 语义约定属性
             from opentelemetry import trace
@@ -143,6 +176,9 @@ class ModelGateway:
                     llm_request_duration_seconds.labels(alias, provider).observe(elapsed)
 
                     usage = getattr(result, "usage_metadata", None) or {}
+                    if run_context is not None:
+                        usage_recorded = True
+                        await record_budget(run_context, estimated, price, reserved_cost, usage)
                     input_tokens = usage.get("input_tokens", 0)
                     output_tokens = usage.get("output_tokens", 0)
                     if input_tokens:
@@ -152,15 +188,20 @@ class ModelGateway:
                         llm_tokens_total.labels(alias, "output").inc(output_tokens)
                         span.set_attribute("gen_ai.usage.output_tokens", output_tokens)
 
-                    price = self.price_for(profile)
                     if price and (input_tokens or output_tokens):
-                        cost = price.input * input_tokens + price.output * output_tokens
+                        cost = (
+                            price.input_per_million * input_tokens
+                            + price.output_per_million * output_tokens
+                        ) / 1_000_000
                         llm_cost_total.labels(alias).inc(cost)
                         span.set_attribute("gen_ai.usage.cost", cost)
 
                     span.set_status(trace.Status(trace.StatusCode.OK))
                     return result
-                except Exception as error:
+                except BaseException as error:
+                    if run_context is not None and not usage_recorded:
+                        usage_recorded = True
+                        await record_budget(run_context, estimated, price, reserved_cost, None)
                     elapsed = time.monotonic() - started
                     llm_requests_total.labels(alias, provider, "error").inc()
                     llm_request_duration_seconds.labels(alias, provider).observe(elapsed)
@@ -169,11 +210,15 @@ class ModelGateway:
                     raise
 
         async def tracked_astream(input, config=None, **kwargs):
+            """包装流式模型调用，在响应完成或中断时持久化用量。"""
             provider = "openai" if profile.provider == "openai_compatible" else profile.provider
             started = time.monotonic()
             ttft = None
             input_tokens = 0
             output_tokens = 0
+            usage_seen = False
+            run_context, estimated, price, reserved_cost = await reserve_budget(input)
+            usage_recorded = False
 
             from opentelemetry import trace
 
@@ -195,6 +240,7 @@ class ModelGateway:
                             span.set_attribute("gen_ai.usage.time_to_first_token", ttft)
 
                         usage = getattr(chunk, "usage_metadata", None) or {}
+                        usage_seen = usage_seen or bool(usage)
                         input_tokens = usage.get("input_tokens", 0) or input_tokens
                         output_tokens = usage.get("output_tokens", 0) or output_tokens
 
@@ -204,6 +250,18 @@ class ModelGateway:
                     llm_requests_total.labels(alias, provider, "success").inc()
                     llm_request_duration_seconds.labels(alias, provider).observe(elapsed)
 
+                    if run_context is not None:
+                        usage_recorded = True
+                        await record_budget(
+                            run_context,
+                            estimated,
+                            price,
+                            reserved_cost,
+                            {"input_tokens": input_tokens, "output_tokens": output_tokens}
+                            if usage_seen
+                            else None,
+                        )
+
                     if input_tokens:
                         llm_tokens_total.labels(alias, "input").inc(input_tokens)
                         span.set_attribute("gen_ai.usage.input_tokens", input_tokens)
@@ -211,15 +269,20 @@ class ModelGateway:
                         llm_tokens_total.labels(alias, "output").inc(output_tokens)
                         span.set_attribute("gen_ai.usage.output_tokens", output_tokens)
 
-                    price = self.price_for(profile)
                     if price and (input_tokens or output_tokens):
-                        cost = price.input * input_tokens + price.output * output_tokens
+                        cost = (
+                            price.input_per_million * input_tokens
+                            + price.output_per_million * output_tokens
+                        ) / 1_000_000
                         llm_cost_total.labels(alias).inc(cost)
                         span.set_attribute("gen_ai.usage.cost", cost)
 
                     span.set_status(trace.Status(trace.StatusCode.OK))
 
-                except Exception as error:
+                except BaseException as error:
+                    if run_context is not None and not usage_recorded:
+                        usage_recorded = True
+                        await record_budget(run_context, estimated, price, reserved_cost, None)
                     elapsed = time.monotonic() - started
                     llm_requests_total.labels(alias, provider, "error").inc()
                     llm_request_duration_seconds.labels(alias, provider).observe(elapsed)

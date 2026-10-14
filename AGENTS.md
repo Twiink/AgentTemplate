@@ -4,7 +4,7 @@ Python 3.12 + FastAPI + PostgreSQL + Redis 通用 Agent 后端模板。核心提
 
 ## 两档预设
 
-**minimal**：只依赖 PostgreSQL，适合快速原型和简单场景。核心功能 + 同步执行 + 本地附件。
+**minimal**：依赖 PostgreSQL 与 Redis，适合快速原型和简单场景。核心功能 + 同步执行 + 本地附件。
 
 **full**：完整生产能力。在 minimal 基础上增加：后台运行、Worker、租约恢复、断线续传、RAG 知识库、长期记忆、观测部署文件。
 

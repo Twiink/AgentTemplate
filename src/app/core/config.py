@@ -216,8 +216,8 @@ class Settings(BaseSettings):
     )
     environment: Literal["local", "test", "staging", "production"] = "local"
     # 预设只决定 modules 的默认值；init 写入私有配置，之后可以直接修改 modules 列表增减模块。
-    preset: Literal["minimal", "full"] = "full"
-    modules: list[str] = Field(default_factory=lambda: list(PRESET_MODULES["full"]))
+    preset: Literal["minimal", "full"] = "minimal"
+    modules: list[str] = Field(default_factory=lambda: list(PRESET_MODULES["minimal"]))
     app_name: str = "AgentTemplate"
     database_url: SecretStr = SecretStr("postgresql+asyncpg://localhost/agenttemplate")
     migration_database_url: SecretStr | None = None
@@ -236,6 +236,7 @@ class Settings(BaseSettings):
     run_timeout_seconds: int = Field(default=300, ge=1)
     run_token_budget: int = Field(default=64000, ge=1)
     run_cost_budget: float | None = Field(default=None, gt=0)
+    monthly_cost_budget: float | None = Field(default=None, gt=0)
     recursion_limit: int = Field(default=25, ge=1)
     lease_seconds: int = Field(default=60, ge=15)
     run_retention_days: int = Field(default=30, ge=1)
@@ -332,7 +333,7 @@ def load_settings(overrides: dict[str, Any] | None = None, root: Path | None = N
     """按基础、预设、环境、私有、环境变量、显式覆盖的顺序读取配置并校验；秘密从不输出。
 
     预设决定默认启用的模块。预设名依次取自显式覆盖、AGENT_PRESET、私有配置、环境配置、
-    基础配置中的 preset 字段，都没有时使用 full。
+    基础配置中的 preset 字段，都没有时使用 minimal。
     """
     root = root or Path(os.environ.get("AGENT_CONFIG_ROOT", "."))
     overrides = overrides or {}
@@ -348,7 +349,7 @@ def load_settings(overrides: dict[str, Any] | None = None, root: Path | None = N
         for layer in (layers["private"], layers["environment"], layers["base"])
         if layer and "preset" in layer
     ]
-    preset = overrides.get("preset") or os.getenv("AGENT_PRESET") or next(iter(declared), "full")
+    preset = overrides.get("preset") or os.getenv("AGENT_PRESET") or next(iter(declared), "minimal")
     if preset not in PRESETS:
         raise ConfigurationError(f"未知预设：{preset}，可选值为 minimal、full")
     files["preset"] = root / f"config/presets/{preset}.yaml"
@@ -368,6 +369,10 @@ def load_settings(overrides: dict[str, Any] | None = None, root: Path | None = N
     env = EnvSettingsSource(Settings)()
     data = merge(data, env)
     data = merge(data, overrides)
+    # 旧配置曾把 run_cost_budget 同时用于主体月度配额；保守继承该限制，
+    # 需要仅设置单次预算的项目可显式写 monthly_cost_budget: null。
+    if "monthly_cost_budget" not in data and data.get("run_cost_budget") is not None:
+        data["monthly_cost_budget"] = data["run_cost_budget"]
     data["environment"] = environment
     data["preset"] = preset
     data["config_sources"] = sources + ["AGENT_* 环境变量", "程序显式覆盖"]

@@ -8,6 +8,7 @@ from app.cli import (  # noqa: F401
     evaluate,
     observability,
     project,
+    scaffold,
     serve,
 )
 from app.cli.app import cli

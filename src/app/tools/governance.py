@@ -22,8 +22,11 @@ def governed_tool(
     def decorate(
         function: Callable[P, Coroutine[Any, Any, R]],
     ) -> Callable[P, Coroutine[Any, Any, R]]:
+        """为函数增加可信运行上下文和 scope 检查。"""
+
         @wraps(function)
         async def wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
+            """拒绝无运行身份或缺少所需权限的调用。"""
             context = current_run.get()
             if context is None:
                 raise AppError(Code.RUN_CONTEXT_REQUIRED, "工具必须在可信运行上下文中调用", 403)

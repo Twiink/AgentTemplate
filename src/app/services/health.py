@@ -97,9 +97,11 @@ async def diagnostics(container, report: PreflightReport | None = None) -> dict:
     report = report or await run_preflight(container.settings)
     results: dict = {
         "tracing": {
-            "status": "configured_unverified"
-            if container.settings.tracing.enabled
-            else "unconfigured"
+            "status": container.telemetry.tracing_status,
+            "instrumentation_failures": list(container.telemetry.instrumentation_failures),
+        },
+        "sentry": {
+            "status": container.telemetry.sentry_status,
         },
         "agents": {
             "status": "configured" if container.agents.describe() else "unconfigured",
